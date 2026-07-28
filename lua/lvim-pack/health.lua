@@ -20,10 +20,14 @@ local M = {}
 function M.check()
     health.start("lvim-pack")
 
-    if vim.fn.has("nvim-0.11") == 1 then
+    -- 0.12, not 0.11: `vim.pack` is what this loader is built on, and 0.11 does not have it.
+    -- `has()` rather than `vim.version.ge`, because a nightly calls itself `0.13.0-dev` and semver
+    -- sorts a pre-release BELOW its release, so a version compare would reject the very build this
+    -- is developed on.
+    if vim.fn.has("nvim-0.12") == 1 then
         health.ok("Neovim " .. tostring(vim.version()))
     else
-        health.error("Neovim 0.11 or newer is required (vim.pack)")
+        health.error("Neovim 0.12 or newer is required (vim.pack)")
     end
 
     if vim.pack ~= nil then
