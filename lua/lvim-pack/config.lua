@@ -23,7 +23,10 @@
 ---@field on_register (fun(registry: table))|nil  the whole static registry, once, after resolve
 ---@field on_load (fun(name: string, reason: string, ms: number))|nil  one plugin finished loading
 ---@field install_ui (fun(specs: table[], ctx: table):boolean)|nil  drive the install; return false
----   to fall back to a plain `vim.pack.add`
+---   to fall back to a plain `vim.pack.add`. `ctx` carries `on_visible()` (call it once the UI is
+---   on screen) and `build_runner(name, done)` — an ASYNC contract: it starts the plugin's build
+---   hook and reports through `done(ok, err)`, so a UI must wait for that call, never for the
+---   return, before it counts the build as finished
 
 ---@type LvimPackConfig
 local M = {

@@ -119,6 +119,14 @@ looking at an empty editor for the seconds the panel needs to load.
                    lvim-installer's panel; returning false (or not being there)
                    falls back to a plain `vim.pack.add`, which installs
                    correctly and silently.
+                   `ctx` carries two seams:
+                     `on_visible()`  call it once the UI is on screen.
+                     `build_runner(name, done)`  ASYNCHRONOUS — it STARTS the
+                     plugin's build hook and answers through `done(ok, err)`.
+                     A native build takes a minute while the call itself
+                     returns in milliseconds, so a UI must count the build only
+                     when `done` arrives, and must not close while one is still
+                     outstanding.
 
 ==============================================================================
 5. API                                                          *lvim-pack-api*

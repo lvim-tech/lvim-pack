@@ -326,14 +326,20 @@ function M.load()
                 -- The panel tells us the moment it is on screen; the phase window steps aside
                 -- exactly then, so neither a gap nor an overlap is possible.
                 on_visible = bootstrap.done,
-                -- Run a plugin's build hook and report ok/err, so the panel can show
-                -- "building … ✓ / ✗".
-                build_runner = function(name)
+                -- Run a plugin's build hook — ASYNCHRONOUSLY. The panel gets its answer through
+                -- `done(ok, err)`, never through the return value: a shell hook is a `vim.system`
+                -- spawn, so starting a cargo build takes ~2 ms and finishing it takes a minute.
+                -- Reading the return as the result is what let the panel report "✓ Built" over a
+                -- compile that had barely begun.
+                ---@param name string
+                ---@param done fun(ok: boolean, err: string|nil)
+                build_runner = function(name, done)
                     local m = state.meta[name]
                     if not (m and m.spec.build and not m.spec.dir) then
-                        return true
+                        done(true)
+                        return
                     end
-                    return build.run(name, m.spec.build, opt_dir .. name)
+                    build.run(name, m.spec.build, opt_dir .. name, done)
                 end,
             })
         end

@@ -98,6 +98,13 @@ require("lvim-pack").setup({
 })
 ```
 
+`install_ui` receives a `ctx` with two seams:
+
+| seam | contract |
+|---|---|
+| `on_visible()` | call it the moment the UI is on screen (the loader's phase window steps aside then) |
+| `build_runner(name, done)` | **asynchronous** — starts that plugin's build hook and answers through `done(ok, err)`. A native build takes a minute while the call returns in milliseconds, so a UI counts a build only when `done` arrives, and must not close while one is outstanding. |
+
 ## API
 
 ```lua

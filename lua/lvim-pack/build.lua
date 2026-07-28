@@ -6,12 +6,20 @@
 -- build is not repeated until the plugin actually changes, and a FAILED build leaves no stamp and
 -- is retried by the sweep.
 --
+-- BECAUSE THE ANSWER COMES LATE, THE CALLER GETS IT THROUGH `on_done` — `run` returns the moment
+-- the build has STARTED, so its return value says nothing about the result. Every caller that
+-- reports a build (the installer's panel) must wait for that callback.
+--
 ---@module "lvim-pack.build"
 
 local config = require("lvim-pack.config")
 local state = require("lvim-pack.state")
 
 local M = {}
+
+--- Builds currently in flight, by plugin name → the callbacks waiting on them.
+---@type table<string, (fun(ok: boolean, err: string|nil))[]>
+local running = {}
 
 --- The installed git commit of a plugin (HEAD), or nil for a non-git / `dir=` plugin.
 ---
@@ -57,12 +65,30 @@ end
 ---   • `function()`    — a SYNChronous build: runs to completion in the call.
 ---   • `function(done)`— an ASYNChronous build: it receives a `done(ok, err?)` callback and MUST
 ---                       call it when finished (e.g. a task's `:map`/`:catch` completion).
+---
+--- RETURNS NOTHING. Only `on_done` carries the result, and for a shell hook it arrives when the
+--- process exits — a minute later for a native library. A caller reading the return value is
+--- reading "the build started".
 ---@param name string
 ---@param build function|string
 ---@param dir? string
 ---@param on_done? fun(ok: boolean, err: string|nil)
 ---@return nil
 function M.run(name, build, dir, on_done)
+    -- ONE BUILD PER PLUGIN AT A TIME. The same plugin is asked to build from three independent
+    -- places — the installer's build phase, the `PackChanged` hook, and the self-healing sweep —
+    -- and the marker that would tell a later caller it is already done is written only when the
+    -- build ENDS. So a request arriving while one is in flight used to start a SECOND compile over
+    -- the same source tree into the same target dir. It attaches to the running build instead and
+    -- is answered by it.
+    if running[name] then
+        if on_done then
+            table.insert(running[name], on_done)
+        end
+        return
+    end
+    running[name] = {}
+
     -- Make the plugin loadable first: a require()-based build hook (e.g. a completion engine's
     -- `require("…").build()`) runs right after install, before the plugin is on the rtp. packadd
     -- is idempotent, so this is safe on the sweep path too.
@@ -70,9 +96,11 @@ function M.run(name, build, dir, on_done)
 
     -- Completion (always on the main loop, so it is safe from a `vim.system` / task callback):
     -- stamp the marker ONLY on success (a failed/partial build stays un-marked so the sweep
-    -- retries), warn on failure, then forward to the caller.
+    -- retries), warn on failure, then answer the caller and everyone who attached meanwhile.
     local function finish(ok, err)
         vim.schedule(function()
+            local waiting = running[name] or {}
+            running[name] = nil
             if ok and dir then
                 local c = M.plugin_commit(dir)
                 if c then
@@ -83,6 +111,10 @@ function M.run(name, build, dir, on_done)
             end
             if on_done then
                 on_done(ok, err)
+            end
+            -- A waiter's own error must not swallow the rest of them (nor the build's result).
+            for _, cb in ipairs(waiting) do
+                pcall(cb, ok, err)
             end
         end)
     end
@@ -116,8 +148,13 @@ function M.run(name, build, dir, on_done)
                 end)
             )
         end
-    elseif on_done then
-        on_done(true)
+    else
+        -- Not a runnable hook (a wrong type): nothing to run, nothing to stamp — but the slot must
+        -- be released, or the plugin could never be built again this session.
+        running[name] = nil
+        if on_done then
+            on_done(true)
+        end
     end
 end
 
