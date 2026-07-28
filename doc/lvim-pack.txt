@@ -134,6 +134,16 @@ looking at an empty editor for the seconds the panel needs to load.
 `require("lvim-pack").setup(opts)`   merge into the live config, then load
 `require("lvim-pack").load()`        load with whatever is already configured
 `require("lvim-pack").stats()`       `{ startup_ms = number|nil }`
+`require("lvim-pack").load_plugin(name[, reason])`
+                                     Load a LAZY plugin RIGHT NOW, with its
+                                     dependencies and its config, exactly as
+                                     one of its triggers would. For code that
+                                     needs a waiting plugin at a moment no
+                                     trigger covers: `require()` cannot load it
+                                     (it is not on the runtimepath yet) and
+                                     `packadd` would skip its dependencies, its
+                                     config and the load report. Idempotent;
+                                     returns false for an unknown name.
 
 `require("lvim-pack.deps").resolve(modules)`  expand `dependencies`
 `require("lvim-pack.deps").bundle(modules)`   expand an umbrella's `pack.lua`
