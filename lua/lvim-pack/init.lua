@@ -293,7 +293,7 @@ function M.load()
         unlock_unpinned(pack_specs)
 
         building_via_installer = true
-        local ok = false
+        local ok, err = false, nil
         if config.install_ui then
             -- THE WINDOW STAYS UNTIL THE PANEL IS ACTUALLY UP. Closing it at the handover left a
             -- bare `[No Name]` on screen for the seconds the panel needs to load and paint its
@@ -302,7 +302,10 @@ function M.load()
             if first_run then
                 bootstrap.say({ "Installing plugins…", "the installer is starting" })
             end
-            ok = pcall(config.install_ui, pack_specs, {
+            ok, err = pcall(config.install_ui, pack_specs, {
+                -- The panel tells us the moment it is on screen; the phase window steps aside
+                -- exactly then, so neither a gap nor an overlap is possible.
+                on_visible = bootstrap.done,
                 -- Run a plugin's build hook and report ok/err, so the panel can show
                 -- "building … ✓ / ✗".
                 build_runner = function(name)
@@ -316,8 +319,17 @@ function M.load()
         end
         building_via_installer = false
         if not ok then
-            -- No panel (absent, or it failed): the plain add installs correctly but says nothing,
-            -- so the phase window stays up to say it instead.
+            -- A FAILED PANEL IS NOT A SILENT ONE. Falling back without a word is what hid a real
+            -- error behind a working install: the plugins landed, the panel never appeared, and
+            -- nothing said why. The fallback still runs — the install must happen — but the
+            -- reason is reported.
+            if err ~= nil then
+                vim.schedule(function()
+                    vim.notify("lvim-pack: the install panel failed — " .. tostring(err), vim.log.levels.WARN)
+                end)
+            end
+            -- The plain add installs correctly but says nothing, so the phase window stays up to
+            -- say it instead.
             if first_run then
                 bootstrap.say({ "Installing plugins…", "this runs once" })
             end
@@ -328,15 +340,25 @@ function M.load()
 
     bootstrap.done()
 
-    -- Eager plugins, highest priority first.
+    -- Eager plugins, highest priority first — and NAME as the tiebreak. Without it the order of
+    -- everything at the default priority came from `pairs`, which Lua does not order: the same
+    -- config loaded in a different sequence on every start, so a plugin that requires another at
+    -- config time succeeded or failed by luck (reported as three consecutive starts with three
+    -- different errors). Ties are now resolved the same way every time.
     table.sort(eager, function(a, b)
-        return (state.meta[a].spec.priority or 50) > (state.meta[b].spec.priority or 50)
+        local pa, pb = state.meta[a].spec.priority or 50, state.meta[b].spec.priority or 50
+        if pa ~= pb then
+            return pa > pb
+        end
+        return a < b
     end)
     for _, name in ipairs(eager) do
         load.plugin(name)
     end
 
-    -- Lazy plugins: register their triggers.
+    -- Lazy plugins: register their triggers. Sorted for the same reason — a trigger's side effects
+    -- (a command, a keymap) must be registered in a fixed order too.
+    table.sort(deferred)
     for _, name in ipairs(deferred) do
         load.triggers(name, state.meta[name].spec)
     end
