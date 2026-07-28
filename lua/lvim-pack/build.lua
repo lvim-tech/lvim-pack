@@ -14,11 +14,38 @@ local state = require("lvim-pack.state")
 local M = {}
 
 --- The installed git commit of a plugin (HEAD), or nil for a non-git / `dir=` plugin.
+---
+--- READ, NOT SPAWNED. This used to shell out to `git rev-parse HEAD`, which is a process per
+--- plugin on the MAIN LOOP — and the build sweep calls it for every plugin that has a build hook,
+--- right while the install panel is animating. On a first install that is dozens of blocking
+--- spawns in a row and the editor stops answering (reported: the panel froze mid-count). The same
+--- answer is two file reads: `.git/HEAD` is either the sha itself (a detached checkout) or a
+--- `ref:` pointing at a file that holds it, with `packed-refs` as the fallback for a ref that has
+--- been packed away.
 ---@param dir string
 ---@return string|nil
 function M.plugin_commit(dir)
-    local out = vim.fn.system({ "git", "-C", dir, "rev-parse", "HEAD" })
-    return (vim.v.shell_error == 0) and (vim.trim(out)) or nil
+    local head = vim.fn.readfile(dir .. "/.git/HEAD", "", 1)[1]
+    if head == nil or head == "" then
+        return nil
+    end
+    head = vim.trim(head)
+    local ref = head:match("^ref:%s*(.+)$")
+    if ref == nil then
+        return head:match("^%x+$") and head or nil
+    end
+    local direct = vim.fn.readfile(dir .. "/.git/" .. ref, "", 1)[1]
+    if direct ~= nil and direct ~= "" then
+        return vim.trim(direct)
+    end
+    -- The ref was packed: `packed-refs` holds `<sha> <refname>` lines.
+    for _, line in ipairs(vim.fn.readfile(dir .. "/.git/packed-refs")) do
+        local sha, name = line:match("^(%x+)%s+(%S+)$")
+        if name == ref then
+            return sha
+        end
+    end
+    return nil
 end
 
 --- Run a plugin's build hook.
