@@ -391,9 +391,17 @@ function M.load()
     -- just after startup — and the startup stat is frozen at that same moment.
     -- FROZEN AT WHICHEVER COMES FIRST. UIEnter is the point every manager measures to, but a
     -- headless run never fires it, and a dashboard can paint before it — so VimEnter is a floor.
+    -- `once` IS PER EVENT, NOT PER GROUP: registering two events with it gives two callbacks, so
+    -- `User VeryLazy` was dispatched twice (visible in the trace as a duplicated pair). The guard
+    -- is what makes it happen once, whichever of the two fires first.
+    local settled = false
     vim.api.nvim_create_autocmd({ "UIEnter", "VimEnter" }, {
         once = true,
         callback = function()
+            if settled then
+                return
+            end
+            settled = true
             trace("UIEnter")
             if config.start_time and state.startup_ms == nil then
                 state.startup_ms = (vim.uv.hrtime() - config.start_time) / 1e6
