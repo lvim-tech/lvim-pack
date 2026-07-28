@@ -1,0 +1,178 @@
+*lvim-pack.txt*      The plugin loader for the lvim-tech set, built on vim.pack
+
+                                                                    *lvim-pack*
+
+==============================================================================
+CONTENTS                                                   *lvim-pack-contents*
+
+    1. Introduction .......................... |lvim-pack-introduction|
+    2. Bootstrap ............................. |lvim-pack-bootstrap|
+    3. The load order ........................ |lvim-pack-order|
+    4. Configuration ......................... |lvim-pack-config|
+    5. API ................................... |lvim-pack-api|
+    6. Plugin specs .......................... |lvim-pack-spec|
+    7. Health ................................ |lvim-pack-health|
+
+==============================================================================
+1. INTRODUCTION                                        *lvim-pack-introduction*
+
+lvim-pack is the plugin LOADER for the lvim-tech set, built on Neovim's own
+`vim.pack`. The host config clones this one repository and calls `setup()` with
+a plugin table; everything after that happens here — fetching what the install
+itself needs, putting local checkouts on the runtimepath, expanding
+dependencies, pinning versions, loading eagerly by priority, wiring the lazy
+triggers, and running build hooks.
+
+It owns LOADING ONLY. What it installs is reported to lvim-pkg (the data hub)
+and painted by lvim-installer (the progress panel), through soft hooks — both
+optional. The loader still loads plugins on a machine where neither exists, and
+it has no hard dependency on anything, because it is what puts the others on
+the runtimepath.
+
+==============================================================================
+2. BOOTSTRAP                                              *lvim-pack-bootstrap*
+
+The whole of it, in the host's `init.lua`: >lua
+    local pack_dir = vim.fn.stdpath("data") .. "/site/pack/core/opt/lvim-pack"
+    if not vim.uv.fs_stat(pack_dir) then
+        vim.fn.system({
+            "git", "clone", "--filter=blob:none",
+            "https://github.com/lvim-tech/lvim-pack", pack_dir,
+        })
+    end
+    vim.opt.rtp:prepend(pack_dir)
+
+    require("lvim-pack").setup({ spec = require("modules") })
+<
+A distribution that keeps local checkouts can prefer them by pointing
+`pack_dir` at the checkout when it exists — the loader itself does the same for
+every plugin whose spec carries `dir`.
+
+==============================================================================
+3. THE LOAD ORDER                                             *lvim-pack-order*
+
+Every step of `load()` was learned from a failure, so the sequence IS the
+design:
+
+1. Built-ins off, spec read.
+
+2. Bootstrap clone with plain `git` — NOT `vim.pack`. The first `vim.pack.add`
+   of a session reconciles the WHOLE lockfile: run it before the install UI
+   exists and it clones every plugin behind vim.pack's own aggregate progress
+   bar, bypassing the per-plugin panel and the build phase entirely.
+
+3. Local (`dir=`) checkouts onto the runtimepath — BEFORE anything requires
+   them, including those nested inside a spec's `dependencies`. Skipping this
+   used to make a require fail silently and leave dependency spec tables
+   un-normalised.
+
+4. Umbrella bundle, then dependency resolve, then version pins — in that order,
+   so a bundled plugin takes part in resolution and pinning like any other.
+
+5. The registry out to the data hub.
+
+6. The install UI — the first and only `vim.pack.add` of the session.
+
+7. Eager loads by priority, then the lazy triggers.
+
+8. `UIEnter` freezes the startup stat and fires `User VeryLazy`; the build
+   sweep follows.
+
+On a first run a small window narrates each of these phases and stays up until
+the installer's panel takes the screen — closing it earlier left the reader
+looking at an empty editor for the seconds the panel needs to load.
+
+==============================================================================
+4. CONFIGURATION                                             *lvim-pack-config*
+
+`spec`             REQUIRED. The plugin table, or a function returning it. A
+                   function so the host can build it (merging its own layers)
+                   when the loader asks rather than when it configures.
+
+`bootstrap`        Repos cloned with plain `git` before the first
+                   `vim.pack.add`. Default: lvim-utils, lvim-pkg,
+                   lvim-installer — the plugins the install itself needs.
+
+`github`           Base URL a bare `owner/name` resolves against.
+
+`pin`              `fun(name) → string|nil`; the version/commit a plugin is
+                   pinned to, BY NAME. The default pins nothing.
+
+`start_time`       `vim.uv.hrtime()` taken at process start. Only the host's
+                   own init.lua can take it, so it is passed in.
+
+`disabled_builtins`  Load-guard globals set to 1 before anything loads.
+
+`very_lazy_delay`  (50) ms after UIEnter before `User VeryLazy` fires.
+
+`ensure_builds_delay`  (1000) ms after startup before pending builds are swept.
+
+`build_marker`     (".lvim-built") stamped in a plugin's dir once its build ran
+                   for that commit. A FAILED build leaves no stamp, so the
+                   sweep retries it.
+
+`on_register`      `fun(registry)` — the whole static registry, once, after
+                   resolve. Defaults to lvim-pkg.
+`on_load`          `fun(name, reason, ms)` — one plugin finished loading.
+                   Defaults to lvim-pkg.
+`install_ui`       `fun(specs, ctx) → boolean` — drive the install. Defaults to
+                   lvim-installer's panel; returning false (or not being there)
+                   falls back to a plain `vim.pack.add`, which installs
+                   correctly and silently.
+
+==============================================================================
+5. API                                                          *lvim-pack-api*
+
+`require("lvim-pack").setup(opts)`   merge into the live config, then load
+`require("lvim-pack").load()`        load with whatever is already configured
+`require("lvim-pack").stats()`       `{ startup_ms = number|nil }`
+
+`require("lvim-pack.deps").resolve(modules)`  expand `dependencies`
+`require("lvim-pack.deps").bundle(modules)`   expand an umbrella's `pack.lua`
+
+The resolver lives INSIDE the loader rather than in the data hub it came from:
+the loader cannot work without it, and a resolver reached across a plugin
+boundary could be missing at exactly the moment it is needed — which is what
+used to happen, silently.
+
+`stats().startup_ms` is the time from `start_time` to a usable editor, frozen
+at UIEnter. Asked BEFORE that moment it answers with the live elapsed time, so
+a dashboard painting early gets an honest number instead of nothing.
+
+==============================================================================
+6. PLUGIN SPECS                                                *lvim-pack-spec*
+
+`dir`              a local checkout: put on the runtimepath, never cloned
+`dependencies`     loaded first, and installed as modules of their own
+`priority`         eager load order, highest first (default 50)
+`lazy`             not loaded at startup; with no trigger AND a config/opts/init
+                   it falls back to `VeryLazy`, since nothing else would ever
+                   load it
+`event` `ft` `cmd` `keys`   what loads it
+`cond`             boolean or function; false installs and registers it but
+                   never loads it and gives it no triggers
+`init`             runs BEFORE the plugin is sourced — the reason it is
+                   separate from `config`: a plugin configured through global
+                   variables reads them while its own files are sourced
+`config` `opts`    run after it is on the runtimepath
+`build`            shell string, `:ExCommand`, or a function. A function
+                   declaring ONE parameter opts into the async contract and
+                   must call the `done(ok, err)` it receives
+`built`            predicate: is the build's artefact present? Self-heals a
+                   build that stamped its marker but produced nothing usable
+`commit` `version` `branch`   what `vim.pack` checks out
+
+==============================================================================
+7. HEALTH                                                    *lvim-pack-health*
+
+`:checkhealth lvim-pack` reports:
+
+- Neovim version and whether `vim.pack` exists at all
+- the host's wiring: `spec` (and whether a function form returns a table), the
+  startup stat, and which seams are connected
+- how many plugins are registered, loaded, and waiting on a trigger — a loader
+  that ran with an empty spec looks healthy until a plugin is missing
+- whether TWO copies of lvim-pack are on the runtimepath: a dev checkout and an
+  installed clone both being live is the one failure that looks like nothing
+
+vim:tw=78:ts=8:noet:ft=help:norl:
