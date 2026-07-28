@@ -143,8 +143,15 @@ function M.run(name, build, dir, on_done)
                 { "sh", "-c", build },
                 { cwd = dir, text = true },
                 vim.schedule_wrap(function(res)
-                    local ok = res.code == 0
-                    finish(ok, ok and nil or (res.stderr ~= "" and res.stderr or ("exit " .. tostring(res.code))))
+                    -- `ok and nil or …` CANNOT express this: `true and nil` is nil, which is falsy,
+                    -- so the `or` branch won every time and a SUCCESSFUL build reported its stderr
+                    -- as an error (visible in the trace as `ok=true err=Compiling lvim-fuzzy…`).
+                    -- cargo writes its progress to stderr, so "stderr is not empty" is not failure.
+                    if res.code == 0 then
+                        finish(true)
+                    else
+                        finish(false, (res.stderr ~= "" and res.stderr) or ("exit " .. tostring(res.code)))
+                    end
                 end)
             )
         end
