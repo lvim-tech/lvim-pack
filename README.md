@@ -111,6 +111,7 @@ require("lvim-pack").setup({
 require("lvim-pack").setup(opts) -- merge into the live config, then load
 require("lvim-pack").load() -- load with whatever is already configured
 require("lvim-pack").stats() -- { startup_ms = number|nil }
+require("lvim-pack").load_plugin(name) -- load a lazy plugin NOW (deps + config + report)
 require("lvim-pack.deps").resolve(modules) -- expand `dependencies` into the module graph
 require("lvim-pack.deps").bundle(modules) -- expand an umbrella's own `pack.lua`
 ```

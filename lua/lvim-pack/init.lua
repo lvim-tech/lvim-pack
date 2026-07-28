@@ -148,6 +148,27 @@ function M.stats()
     return { startup_ms = state.startup_ms }
 end
 
+--- Load a LAZY plugin right now, with its dependencies, exactly as a trigger would.
+---
+--- THE SEAM FOR "I NEED IT AT THIS MOMENT". A plugin that is waiting on a trigger is not on the
+--- runtimepath, so a plain `require("lvim-x")` fails — and reaching for `packadd` instead loads the
+--- files behind the loader's back: dependencies are skipped, its `config` never runs, and the load
+--- is missing from the registry. This does what the trigger does, and is idempotent (a plugin
+--- already loaded returns immediately).
+---
+--- Use it when a lazy plugin is needed programmatically rather than by one of its own triggers —
+--- e.g. a panel that opens a terminal through lvim-shell.
+---@param name string  the plugin's NAME (the part after the slash, e.g. "lvim-shell")
+---@param reason? string  what asked for it, for the load report (default "on demand")
+---@return boolean loaded  false when no such plugin is registered
+function M.load_plugin(name, reason)
+    if state.meta[name] == nil then
+        return false
+    end
+    load.plugin(name, reason or "on demand")
+    return true
+end
+
 --- Register and load every plugin.
 ---@return nil
 function M.load()
