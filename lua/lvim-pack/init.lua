@@ -32,6 +32,18 @@ local state = require("lvim-pack.state")
 
 local M = {}
 
+--- Trace one phase, when tracing is on. Optional cross-plugin dependency: the loader must run on
+--- a machine where the data hub is absent, so a missing tracer is simply silence.
+---@param fmt string
+---@param ... any
+---@return nil
+local function trace(fmt, ...)
+    local ok, t = pcall(require, "lvim-pkg.trace")
+    if ok then
+        t.log(fmt, ...)
+    end
+end
+
 --- Merge user options into the live config. Uses lvim-utils' shared merge when it is around and a
 --- plain assign otherwise — this plugin has NO hard dependency on anything, because it is what
 --- puts the others on the runtimepath.
@@ -143,13 +155,16 @@ function M.load()
         vim.g[guard] = 1
     end
 
+    trace("load: start")
     local modules = spec_table()
+    trace("spec: %d entries", vim.tbl_count(modules))
 
     -- The plugins the install itself needs, before the first `vim.pack.add`. On a first run this
     -- puts a window on screen; it stays up, NARRATING each phase, until the installer's own panel
     -- takes the screen — otherwise the seconds between the clone and that panel pass with nothing
     -- to look at (measured on a first run: eight seconds of a stale "cloning …" line).
     local first_run = bootstrap.run(modules)
+    trace("bootstrap: done (first_run=%s)", tostring(first_run))
 
     -- Every `dir=` (dev) plugin onto the runtimepath BEFORE the dependency resolver runs. The
     -- resolver used to live in another plugin, which could itself be declared as a dir dependency
@@ -181,9 +196,11 @@ function M.load()
         bootstrap.say({ "Preparing the package manager…", "resolving dependencies" })
     end
     modules = deps.bundle(modules)
+    trace("bundle: %d entries", vim.tbl_count(modules))
 
     -- Expand declared dependencies into the module graph (vim.pack does NOT auto-install them).
     modules = deps.resolve(modules)
+    trace("resolve: %d entries", vim.tbl_count(modules))
 
     -- Pin the dependencies just added: a top-level module already carries its own pin from its
     -- declaration; a dependency without one is pinned by NAME, or tracks HEAD when the host has
@@ -259,7 +276,9 @@ function M.load()
     if first_run then
         bootstrap.say({ "Preparing the package manager…", "registering " .. vim.tbl_count(state.meta) .. " plugins" })
     end
+    trace("register: %d plugins", vim.tbl_count(state.meta))
     register()
+    trace("register: done")
 
     -- While the installer's panel is running it OWNS the build phase (so it can show a per-plugin
     -- "building …" status). The PackChanged-driven build is suppressed for that window to avoid
@@ -290,6 +309,7 @@ function M.load()
     -- decided below, not by vim.pack.
     if #pack_specs > 0 then
         local opt_dir = vim.fn.stdpath("data") .. "/site/pack/core/opt/"
+        trace("install: %d specs to consider", #pack_specs)
         unlock_unpinned(pack_specs)
 
         building_via_installer = true
@@ -318,6 +338,7 @@ function M.load()
             })
         end
         building_via_installer = false
+        trace("install: returned (ok=%s)", tostring(ok))
         if not ok then
             -- A FAILED PANEL IS NOT A SILENT ONE. Falling back without a word is what hid a real
             -- error behind a working install: the plugins landed, the panel never appeared, and
@@ -352,12 +373,15 @@ function M.load()
         end
         return a < b
     end)
+    trace("eager: %d plugins", #eager)
     for _, name in ipairs(eager) do
         load.plugin(name)
     end
+    trace("eager: done")
 
     -- Lazy plugins: register their triggers. Sorted for the same reason — a trigger's side effects
     -- (a command, a keymap) must be registered in a fixed order too.
+    trace("triggers: %d plugins", #deferred)
     table.sort(deferred)
     for _, name in ipairs(deferred) do
         load.triggers(name, state.meta[name].spec)
@@ -370,18 +394,26 @@ function M.load()
     vim.api.nvim_create_autocmd({ "UIEnter", "VimEnter" }, {
         once = true,
         callback = function()
+            trace("UIEnter")
             if config.start_time and state.startup_ms == nil then
                 state.startup_ms = (vim.uv.hrtime() - config.start_time) / 1e6
             end
             vim.defer_fn(function()
+                trace("VeryLazy: fire")
                 vim.api.nvim_exec_autocmds("User", { pattern = "VeryLazy", modeline = false })
+                trace("VeryLazy: done")
             end, config.very_lazy_delay)
         end,
     })
 
     -- Self-heal native builds without manual steps: run any build hook whose marker is missing or
     -- stale. Deferred off the hot path.
-    vim.defer_fn(build.ensure, config.ensure_builds_delay)
+    trace("load: done")
+    vim.defer_fn(function()
+        trace("build sweep: start")
+        build.ensure()
+        trace("build sweep: done")
+    end, config.ensure_builds_delay)
 end
 
 --- Merge the host's options into the live config, install the defaults that reach for the sibling

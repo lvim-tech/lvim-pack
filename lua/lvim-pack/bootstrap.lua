@@ -103,6 +103,10 @@ function M.run(modules)
                 "Preparing the package manager…",
                 ("cloning %s  (%d/%d)"):format(m.name, i, #missing),
             })
+            local tok, tr = pcall(require, "lvim-pkg.trace")
+            if tok then
+                tr.log("bootstrap: clone %s", m.name)
+            end
             pcall(vim.fn.system, { "git", "clone", "--filter=blob:none", config.github .. m.repo, opt .. m.name })
         end
     end
