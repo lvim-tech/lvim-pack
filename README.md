@@ -50,6 +50,31 @@ Every step of `load()` was learned from a failure, so the sequence is the design
 7. **Eager loads by priority**, then the lazy triggers.
 8. **`UIEnter`** freezes the startup stat and fires `User VeryLazy`; the build sweep follows.
 
+## Pinning, and who outranks whom
+
+`vim.pack` keeps a lockfile of its own (`nvim-pack-lock.json`) and reads it as **authoritative at
+install time**: a plugin listed there is checked out at the recorded revision instead of the one
+inferred from its spec. That file is machine-local — vim.pack writes it itself on every install and
+update — so on its own it would outrank the pin the host declared, and a `pin` would only ever take
+effect through an explicit checkout afterwards.
+
+So the loader states the intent where vim.pack looks. Before the first `vim.pack.add`, for a plugin
+that is **not yet on disk**, the lock entry is dropped when the spec carries a pin — leaving that pin
+as the only answer:
+
+1. **the spec's pin** (`commit`, which is where `pin(name)` lands) — the declared intent wins
+2. **the lock entry** — no pin means nothing was declared, so this machine's record decides
+3. **`version` / `branch`** — the tip, when neither has an answer
+
+An already-installed plugin is never touched: vim.pack repairs its entry from the checkout anyway,
+and moving one to another revision is an update, not an install.
+
+The same pass drops **ghost entries** — a plugin in the lockfile that is neither in the spec nor on
+disk. Everything the lockfile lists gets installed, so such an entry silently resurrects a plugin
+nobody declares any more; the spec decides *what* exists, the lock only answers *which revision* for
+something the spec declares. An entry whose plugin is on disk stays: it may be installed on purpose
+outside the spec, and nothing here uninstalls anything.
+
 ## Configuration
 
 ```lua
@@ -68,7 +93,7 @@ require("lvim-pack").setup({
     github = "https://github.com/", -- base URL a bare `owner/name` resolves against
 
     -- The version/commit a plugin is pinned to, by NAME. The default pins nothing; a distribution
-    -- that keeps a snapshot file answers from it.
+    -- that keeps a snapshot file answers from it. A pin outranks vim.pack's lockfile — see above.
     pin = function(_name)
         return nil
     end,

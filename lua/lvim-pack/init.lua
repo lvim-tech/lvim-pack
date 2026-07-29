@@ -104,13 +104,32 @@ local function register()
     end
 end
 
---- Make the lockfile follow the active pins: a plugin that tracks latest (no pin → version nil)
---- must not stay frozen at a stale locked revision on a fresh install. The lock entry for such a
---- plugin that is not yet on disk is dropped, so vim.pack resolves the branch tip instead of the
---- old recorded commit.
+--- Reconcile vim.pack's lockfile with the declared pins before the first `vim.pack.add`.
+---
+--- vim.pack reads its lockfile as AUTHORITATIVE at install time: a plugin listed there is checked
+--- out at the recorded revision instead of the one inferred from `version`. That makes the lockfile
+--- — a machine-local file vim.pack writes itself — outrank the pin the host declared, which is
+--- backwards: the pin is the intent (a snapshot the user curated), the lock is only the record of
+--- what this machine happens to have. So the intent is expressed where vim.pack looks: dropping the
+--- lock entry leaves `version` (the pin) as the only answer.
+---
+--- Authority, highest first:
+---   1. the spec's pin (`commit`, where `config.pin` — the active snapshot — lands)
+---   2. the lock entry: no pin means nothing was declared, so this machine's record decides
+---   3. `version` / `branch` → the branch tip, when neither has an answer
+---
+--- Only plugins NOT yet on disk are touched. For an installed plugin vim.pack repairs the entry
+--- from the checkout anyway, and moving one to another revision is an update, not an install.
+---
+--- The same pass drops GHOST entries — a plugin that is in the lockfile but neither in the spec nor
+--- on disk. vim.pack installs everything the lockfile lists, so such an entry silently resurrects a
+--- plugin nobody declares any more (a config carried over from another manager brings back its whole
+--- old set on the next start). The spec decides WHAT exists; the lock only answers WHICH REVISION
+--- for something the spec declares. An entry whose plugin IS on disk is left alone — it may well be
+--- installed on purpose outside the spec, and nothing here uninstalls anything.
 ---@param pack_specs table[]
 ---@return nil
-local function unlock_unpinned(pack_specs)
+local function reconcile_lock(pack_specs)
     local opt_dir = vim.fn.stdpath("data") .. "/site/pack/core/opt/"
     local lock_path = vim.fn.stdpath("config") .. "/nvim-pack-lock.json"
     local ok_read, content = pcall(vim.fn.readfile, lock_path)
@@ -122,9 +141,18 @@ local function unlock_unpinned(pack_specs)
         return
     end
     local changed = false
+    ---@type table<string, boolean>
+    local declared = {}
     for _, ps in ipairs(pack_specs) do
-        if ps.version == nil and lock.plugins[ps.name] and vim.fn.isdirectory(opt_dir .. ps.name) == 0 then
+        declared[ps.name] = true
+        if ps.pin ~= nil and lock.plugins[ps.name] and vim.fn.isdirectory(opt_dir .. ps.name) == 0 then
             lock.plugins[ps.name] = nil
+            changed = true
+        end
+    end
+    for name in pairs(lock.plugins) do
+        if not declared[name] and vim.fn.isdirectory(opt_dir .. name) == 0 then
+            lock.plugins[name] = nil
             changed = true
         end
     end
@@ -251,6 +279,10 @@ function M.load()
                     src = config.github .. repo,
                     name = name,
                     version = spec.commit or spec.version or spec.branch,
+                    -- Kept apart from `version`: only `commit` is a PIN (the host's answer for this
+                    -- name), while `version`/`branch` say "track this ref". The lock reconciliation
+                    -- above needs that difference — a tracked ref must not evict a lock entry.
+                    pin = spec.commit,
                     has_build = spec.build ~= nil,
                 }
             end
@@ -331,7 +363,7 @@ function M.load()
     if #pack_specs > 0 then
         local opt_dir = vim.fn.stdpath("data") .. "/site/pack/core/opt/"
         trace("install: %d specs to consider", #pack_specs)
-        unlock_unpinned(pack_specs)
+        reconcile_lock(pack_specs)
 
         building_via_installer = true
         local ok, err = false, nil

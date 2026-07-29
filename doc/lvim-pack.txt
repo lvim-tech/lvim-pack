@@ -9,9 +9,10 @@ CONTENTS                                                   *lvim-pack-contents*
     2. Bootstrap ............................. |lvim-pack-bootstrap|
     3. The load order ........................ |lvim-pack-order|
     4. Configuration ......................... |lvim-pack-config|
-    5. API ................................... |lvim-pack-api|
-    6. Plugin specs .......................... |lvim-pack-spec|
-    7. Health ................................ |lvim-pack-health|
+    5. Pinning ............................... |lvim-pack-pinning|
+    6. API ................................... |lvim-pack-api|
+    7. Plugin specs .......................... |lvim-pack-spec|
+    8. Health ................................ |lvim-pack-health|
 
 ==============================================================================
 1. INTRODUCTION                                        *lvim-pack-introduction*
@@ -96,7 +97,8 @@ looking at an empty editor for the seconds the panel needs to load.
 `github`           Base URL a bare `owner/name` resolves against.
 
 `pin`              `fun(name) → string|nil`; the version/commit a plugin is
-                   pinned to, BY NAME. The default pins nothing.
+                   pinned to, BY NAME. The default pins nothing. A pin outranks
+                   vim.pack's own lockfile — see |lvim-pack-pinning|.
 
 `start_time`       `vim.uv.hrtime()` taken at process start. Only the host's
                    own init.lua can take it, so it is passed in.
@@ -129,7 +131,38 @@ looking at an empty editor for the seconds the panel needs to load.
                      outstanding.
 
 ==============================================================================
-5. API                                                          *lvim-pack-api*
+5. PINNING                                                  *lvim-pack-pinning*
+
+`vim.pack` keeps a lockfile of its own (`nvim-pack-lock.json`) and reads it as
+AUTHORITATIVE at install time: a plugin listed there is checked out at the
+recorded revision instead of the one inferred from its spec. That file is
+machine-local — vim.pack writes it itself on every install and update — so left
+alone it would outrank the pin the host declared, and `pin` would take effect
+only through an explicit checkout afterwards.
+
+The loader therefore states the intent where vim.pack looks. Before the first
+`vim.pack.add`, for a plugin that is NOT YET ON DISK, the lock entry is dropped
+when the spec carries a pin, leaving that pin as the only answer:
+
+1. the spec's pin (`commit`, where `pin(name)` lands) — the declared intent wins
+2. the lock entry — no pin means nothing was declared, so this machine's record
+   decides
+3. `version` / `branch` — the tip, when neither has an answer
+
+An already-installed plugin is never touched: vim.pack repairs its entry from
+the checkout anyway, and moving one to another revision is an update, not an
+install. So switching the pin set governs what a fresh machine installs, while
+moving an existing install to it is the updater's job.
+
+The same pass drops GHOST entries — a plugin in the lockfile that is neither in
+the spec nor on disk. Everything the lockfile lists gets installed, so such an
+entry silently resurrects a plugin nobody declares any more; the spec decides
+WHAT exists, the lock only answers WHICH REVISION for something the spec
+declares. An entry whose plugin is on disk stays: it may be installed on purpose
+outside the spec, and nothing here uninstalls anything.
+
+==============================================================================
+6. API                                                          *lvim-pack-api*
 
 `require("lvim-pack").setup(opts)`   merge into the live config, then load
 `require("lvim-pack").load()`        load with whatever is already configured
@@ -158,7 +191,7 @@ at UIEnter. Asked BEFORE that moment it answers with the live elapsed time, so
 a dashboard painting early gets an honest number instead of nothing.
 
 ==============================================================================
-6. PLUGIN SPECS                                                *lvim-pack-spec*
+7. PLUGIN SPECS                                                *lvim-pack-spec*
 
 `dir`              a local checkout: put on the runtimepath, never cloned
 `dependencies`     loaded first, and installed as modules of their own
@@ -181,7 +214,7 @@ a dashboard painting early gets an honest number instead of nothing.
 `commit` `version` `branch`   what `vim.pack` checks out
 
 ==============================================================================
-7. HEALTH                                                    *lvim-pack-health*
+8. HEALTH                                                    *lvim-pack-health*
 
 `:checkhealth lvim-pack` reports:
 
