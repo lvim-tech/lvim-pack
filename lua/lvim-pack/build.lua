@@ -134,7 +134,9 @@ function M.run(name, build, dir, on_done)
         end
     elseif type(build) == "string" then
         if build:sub(1, 1) == ":" then
-            local ok, err = pcall(vim.cmd, build:sub(2))
+            local ok, err = pcall(function()
+                vim.cmd(build:sub(2))
+            end)
             finish(ok, err)
         else
             -- Shell build, DETACHED (async) in the plugin dir so relative hooks like

@@ -50,9 +50,8 @@ local M = {
 
     -- The pin for a plugin, by name. The default pins nothing — a distribution that keeps a
     -- snapshot file answers from it.
-    ---@param _name string
     ---@return string|nil
-    pin = function(_name)
+    pin = function()
         return nil
     end,
 
