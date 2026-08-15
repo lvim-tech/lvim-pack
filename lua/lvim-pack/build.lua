@@ -171,12 +171,17 @@ end
 --- missing or stale (the commit changed). Covers a build added to an already installed plugin, a
 --- reinstall (git checkout, no PackChanged), or a missing artefact. Deferred so it never blocks
 --- startup; native libs land for the next session.
+---
+--- `dir=` (dev) checkouts are swept too, not only opt-installed plugins: a dev checkout is still a
+--- git repo, so the same commit-stamped marker self-heals it — a dev plugin's native library builds
+--- once with no manual `sh native/build.sh`. Only an UNCOMMITTED native edit is missed (the commit
+--- is unchanged); the `built` predicate, or a manual build, covers that case.
 ---@return nil
 function M.ensure()
     local opt_dir = vim.fn.stdpath("data") .. "/site/pack/core/opt/"
     for name, m in pairs(state.meta) do
-        if m.spec.build and not m.spec.dir then
-            local dir = opt_dir .. name
+        if m.spec.build then
+            local dir = m.spec.dir or (opt_dir .. name)
             if vim.fn.isdirectory(dir) == 1 then
                 local cur = M.plugin_commit(dir)
                 local marker = dir .. "/" .. config.build_marker
