@@ -1,10 +1,10 @@
 -- lvim-pack.build: a plugin's build hook — running it, marking it done, and healing it later.
 --
 -- A build is ASYNCHRONOUS by default because a native-library compile can take a minute, and a
--- synchronous one freezes the whole UI (and the installer's panel, mid-redraw). On success the
--- plugin's directory is stamped with the marker file, holding the commit the build ran for — so a
--- build is not repeated until the plugin actually changes, and a FAILED build leaves no stamp and
--- is retried by the sweep.
+-- synchronous one freezes the whole UI (and the installer's panel, mid-redraw). On success a
+-- marker file is stamped in the loader's own state dir, holding the commit the build ran for — so
+-- a build is not repeated until the plugin actually changes, and a FAILED build leaves no stamp
+-- and is retried by the sweep.
 --
 -- BECAUSE THE ANSWER COMES LATE, THE CALLER GETS IT THROUGH `on_done` — `run` returns the moment
 -- the build has STARTED, so its return value says nothing about the result. Every caller that
@@ -20,6 +20,15 @@ local M = {}
 --- Builds currently in flight, by plugin name → the callbacks waiting on them.
 ---@type table<string, (fun(ok: boolean, err: string|nil))[]>
 local running = {}
+
+--- Where a plugin's build marker lives: the loader's OWN state dir, not the plugin's directory.
+--- Stamping the plugin's checkout left an untracked file in every clone with a build hook — each
+--- user's `git status` permanently dirty over loader state. The marker belongs to the loader.
+---@param name string
+---@return string
+local function marker_path(name)
+    return vim.fn.stdpath("data") .. "/lvim-pack/built/" .. name
+end
 
 --- The installed git commit of a plugin (HEAD), or nil for a non-git / `dir=` plugin.
 ---
@@ -104,7 +113,11 @@ function M.run(name, build, dir, on_done)
             if ok and dir then
                 local c = M.plugin_commit(dir)
                 if c then
-                    pcall(vim.fn.writefile, { c }, dir .. "/" .. config.build_marker)
+                    local path = marker_path(name)
+                    pcall(vim.fn.mkdir, vim.fn.fnamemodify(path, ":h"), "p")
+                    pcall(vim.fn.writefile, { c }, path)
+                    -- The retired in-repo stamp, if a previous version left one.
+                    pcall(vim.fn.delete, dir .. "/" .. config.build_marker)
                 end
             elseif not ok then
                 vim.notify("lvim-pack: build failed for " .. name .. ": " .. tostring(err), vim.log.levels.WARN)
@@ -184,7 +197,18 @@ function M.ensure()
             local dir = m.spec.dir or (opt_dir .. name)
             if vim.fn.isdirectory(dir) == 1 then
                 local cur = M.plugin_commit(dir)
-                local marker = dir .. "/" .. config.build_marker
+                local marker = marker_path(name)
+                -- Migrate a marker a previous version stamped in the plugin's directory: adopt
+                -- its commit (no pointless rebuild) and remove the file from the repo.
+                local legacy = dir .. "/" .. config.build_marker
+                if vim.fn.filereadable(marker) == 0 and vim.fn.filereadable(legacy) == 1 then
+                    local c = vim.trim((vim.fn.readfile(legacy)[1] or ""))
+                    if c ~= "" then
+                        pcall(vim.fn.mkdir, vim.fn.fnamemodify(marker, ":h"), "p")
+                        pcall(vim.fn.writefile, { c }, marker)
+                    end
+                    pcall(vim.fn.delete, legacy)
+                end
                 local built = (vim.fn.filereadable(marker) == 1) and vim.trim((vim.fn.readfile(marker)[1] or "")) or nil
                 -- Rebuild when the marker is missing/stale (commit changed) OR when an optional
                 -- `built` predicate reports the artefact is absent. The predicate self-heals a

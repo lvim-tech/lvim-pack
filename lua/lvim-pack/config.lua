@@ -19,7 +19,7 @@
 ---@field disabled_builtins string[]  load-guard globals set to 1 before anything loads
 ---@field very_lazy_delay integer  ms after UIEnter before the VeryLazy event fires
 ---@field ensure_builds_delay integer  ms after startup before pending builds are swept
----@field build_marker string  file stamped in a plugin's dir once its build ran for that commit
+---@field build_marker string  LEGACY name of the in-repo stamp older versions wrote; markers now live under stdpath("data")/lvim-pack/built/ and the sweep migrates+removes the old file
 ---@field on_register (fun(registry: table))|nil  the whole static registry, once, after resolve
 ---@field on_load (fun(name: string, reason: string, ms: number))|nil  one plugin finished loading
 ---@field install_ui (fun(specs: table[], ctx: table):boolean)|nil  drive the install; return false
