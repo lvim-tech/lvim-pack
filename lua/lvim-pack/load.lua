@@ -89,6 +89,13 @@ end
 ---@param spec table
 ---@return nil
 function M.triggers(name, spec)
+    -- Already loaded — pulled in eagerly as another plugin's dependency before the trigger
+    -- phase. Its real commands and maps are in place; a cmd stub registered now would SHADOW
+    -- the real command, and firing it deletes the stub and loads nothing (the loaded guard
+    -- returns early), leaving the command gone for the rest of the session.
+    if state.loaded[name] then
+        return
+    end
     local function load(reason)
         M.plugin(name, reason)
     end
