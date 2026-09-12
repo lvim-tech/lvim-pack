@@ -139,7 +139,20 @@ function M.triggers(name, spec)
             vim.api.nvim_create_user_command(cmd, function(args)
                 pcall(vim.api.nvim_del_user_command, cmd)
                 load("cmd: " .. cmd)
-                vim.cmd(string.format("%s%s %s", args.bang and "!" or "", cmd, args.args or ""))
+                -- Replay the invocation on the REAL command, structurally. The string form
+                -- `"!" .. cmd` put the bang before the name, which is `:!Cmd` — a shell command —
+                -- and the range/count/modifiers were dropped entirely, so `:'<,'>Cmd` reached the
+                -- plugin as a whole-buffer call on its first use.
+                local replay = { cmd = cmd, bang = args.bang, mods = args.smods }
+                if args.args ~= nil and args.args ~= "" then
+                    replay.args = { args.args }
+                end
+                if args.range == 2 then
+                    replay.range = { args.line1, args.line2 }
+                elseif args.range == 1 then
+                    replay.range = { args.line1 }
+                end
+                vim.cmd(replay)
             end, { nargs = "*", range = true, bang = true })
         end
     end
