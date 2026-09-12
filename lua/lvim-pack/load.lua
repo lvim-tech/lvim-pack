@@ -178,7 +178,16 @@ function M.triggers(name, spec)
 
     if spec.cmd then
         local cmds = type(spec.cmd) == "table" and spec.cmd or { spec.cmd }
+        local existing = vim.api.nvim_get_commands({})
         for _, cmd in ipairs(cmds) do
+            -- A command that ALREADY EXISTS is the real one — a `dir=` plugin's `plugin/` file is
+            -- sourced at startup, so its command is in place before the trigger phase. Registering
+            -- the stub over it replaced the real handler, and the stub's first use deleted the
+            -- command outright when the plugin's config defined none itself. Leave it alone: the
+            -- command works as sourced, and the other triggers still load the config.
+            if existing[cmd] then
+                goto continue
+            end
             vim.api.nvim_create_user_command(cmd, function(args)
                 pcall(vim.api.nvim_del_user_command, cmd)
                 load("cmd: " .. cmd)
@@ -197,6 +206,7 @@ function M.triggers(name, spec)
                 end
                 vim.cmd(replay)
             end, { nargs = "*", range = true, bang = true })
+            ::continue::
         end
     end
 end
