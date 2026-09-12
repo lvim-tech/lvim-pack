@@ -107,8 +107,12 @@ function M.triggers(name, spec)
             once = true,
             callback = function(args)
                 load("ft: " .. (args.match or vim.bo.filetype))
-                -- Re-fire FileType so the just-loaded plugin sees the current buffer.
-                vim.api.nvim_exec_autocmds("FileType", { pattern = vim.bo.filetype })
+                -- Re-fire FileType for the buffer that triggered it, so the just-loaded plugin's
+                -- own FileType handlers see THAT buffer (not whatever is current), with the
+                -- filetype it carries and without re-running its modeline.
+                if vim.api.nvim_buf_is_valid(args.buf) then
+                    vim.api.nvim_exec_autocmds("FileType", { buffer = args.buf, modeline = false })
+                end
             end,
         })
     end
