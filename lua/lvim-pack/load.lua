@@ -90,14 +90,53 @@ end
 ---@return nil
 function M.triggers(name, spec)
     -- Already loaded — pulled in eagerly as another plugin's dependency before the trigger
-    -- phase. Its real commands and maps are in place; a cmd stub registered now would SHADOW
-    -- the real command, and firing it deletes the stub and loads nothing (the loaded guard
-    -- returns early), leaving the command gone for the rest of the session.
-    if state.loaded[name] then
-        return
-    end
+    -- phase. Its real commands are in place; a cmd stub registered now would SHADOW the real
+    -- command, and firing it deletes the stub and loads nothing (the loaded guard returns
+    -- early), leaving the command gone for the rest of the session. The `keys` are different:
+    -- a key spec's rhs is the host's OWN mapping, which nothing else installs — so those are
+    -- registered directly, and only the stubs (cmd/ft/event) are skipped.
+    local already = state.loaded[name] == true
     local function load(reason)
         M.plugin(name, reason)
+    end
+
+    if spec.keys then
+        -- `keys` may be a list of specs, a single lhs string, or a function returning a list —
+        -- evaluate the function once to get the specs.
+        local raw = type(spec.keys) == "function" and spec.keys() or spec.keys
+        local keys = type(raw) == "table" and raw or { raw }
+        for _, key in ipairs(keys) do
+            -- A key spec is lhs (string) or { lhs, rhs?, mode?, desc? }. The rhs is the ACTION, and
+            -- it must be installed after loading — otherwise the re-fed key only loads the plugin
+            -- and does nothing.
+            local lhs, rhs, mode, desc
+            if type(key) == "table" then
+                lhs, rhs, mode, desc = key[1], key[2], key.mode, key.desc
+            else
+                lhs = key
+            end
+            mode = mode or { "n", "v" }
+            if type(lhs) == "string" then
+                if already then
+                    if rhs ~= nil then
+                        vim.keymap.set(mode, lhs, rhs, { desc = desc, silent = true })
+                    end
+                else
+                    vim.keymap.set(mode, lhs, function()
+                        pcall(vim.keymap.del, mode, lhs)
+                        load("keys: " .. lhs)
+                        if rhs ~= nil then
+                            vim.keymap.set(mode, lhs, rhs, { desc = desc, silent = true })
+                        end
+                        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(lhs, true, false, true), "m", false)
+                    end, { desc = desc })
+                end
+            end
+        end
+    end
+
+    if already then
+        return
     end
 
     if spec.ft then
@@ -158,35 +197,6 @@ function M.triggers(name, spec)
                 end
                 vim.cmd(replay)
             end, { nargs = "*", range = true, bang = true })
-        end
-    end
-
-    if spec.keys then
-        -- `keys` may be a list of specs, a single lhs string, or a function returning a list —
-        -- evaluate the function once to get the specs.
-        local raw = type(spec.keys) == "function" and spec.keys() or spec.keys
-        local keys = type(raw) == "table" and raw or { raw }
-        for _, key in ipairs(keys) do
-            -- A key spec is lhs (string) or { lhs, rhs?, mode?, desc? }. The rhs is the ACTION, and
-            -- it must be installed after loading — otherwise the re-fed key only loads the plugin
-            -- and does nothing.
-            local lhs, rhs, mode, desc
-            if type(key) == "table" then
-                lhs, rhs, mode, desc = key[1], key[2], key.mode, key.desc
-            else
-                lhs = key
-            end
-            mode = mode or { "n", "v" }
-            if type(lhs) == "string" then
-                vim.keymap.set(mode, lhs, function()
-                    pcall(vim.keymap.del, mode, lhs)
-                    load("keys: " .. lhs)
-                    if rhs ~= nil then
-                        vim.keymap.set(mode, lhs, rhs, { desc = desc, silent = true })
-                    end
-                    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(lhs, true, false, true), "m", false)
-                end, { desc = desc })
-            end
         end
     end
 end
