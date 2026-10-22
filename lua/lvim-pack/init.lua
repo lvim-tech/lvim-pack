@@ -459,6 +459,10 @@ function M.load()
     -- is what makes it happen once, whichever of the two fires first.
     local settled = false
     vim.api.nvim_create_autocmd({ "UIEnter", "VimEnter" }, {
+        -- `once` is consumed by the EVENT, so a second setup() before either fires left a second
+        -- pair of handlers behind — each with its own `settled` closure, so `User VeryLazy` was
+        -- dispatched twice after all. The group means a re-registration replaces the pair.
+        group = vim.api.nvim_create_augroup("LvimPackSettled", { clear = true }),
         once = true,
         callback = function()
             if settled then
