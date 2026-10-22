@@ -35,9 +35,34 @@ it("there are modules to load at all", function()
     truthy(#mods > 0, "no modules found under " .. root)
 end)
 
+--- The name of the THIRD-PARTY module a load error blames, if any. An absent sqlite.lua or
+--- another external dependency is a fact about this machine; an lvim-* module that will not load,
+--- or any other error, is ours.
+---@param err string
+---@return string|nil
+local function missing_external(err)
+    local name = tostring(err):match("module '([^']+)' not found")
+    if name and not vim.startswith(name, "lvim-") then
+        return name
+    end
+    -- A module that failed because the one it requires failed is the same fact, once removed.
+    if tostring(err):match("loop or previous error loading module") then
+        return "a dependency that already failed to load"
+    end
+    return nil
+end
+
 for _, mod in ipairs(mods) do
     it(mod, function()
         local ok, err = pcall(require, mod)
+        if not ok then
+            local external = missing_external(err)
+            if external then
+                -- Reported as a skip, never as a pass: the module is NOT known to work here.
+                skip(mod, "needs " .. external .. ", which is not installed on this machine")
+                return
+            end
+        end
         truthy(ok, tostring(err))
     end)
 end
