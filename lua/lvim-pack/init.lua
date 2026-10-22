@@ -339,6 +339,10 @@ function M.load()
     local building_via_installer = false
 
     vim.api.nvim_create_autocmd("PackChanged", {
+        -- Grouped so a second setup() REPLACES this handler instead of adding one. Ungrouped, two
+        -- setup() calls meant two builds per update — exactly what `building_via_installer` below
+        -- exists to prevent for the installer's window.
+        group = vim.api.nvim_create_augroup("LvimPackBuild", { clear = true }),
         callback = function(ev)
             if building_via_installer then
                 return
