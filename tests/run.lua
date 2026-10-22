@@ -9,6 +9,24 @@
 -- needs one it cannot find SKIPS and says why, because "the dependency is missing"
 -- must never read as "the code works".
 
+-- A spec may open a store, write a cache or persist state. None of that may reach the real
+-- editor's data, so `make test` redirects the XDG homes into a throwaway directory and this is
+-- the guard that the redirection actually happened: refuse to run rather than write into
+-- ~/.local/share/nvim. (A suite that silently wrote there would be found out by the damage.)
+local sandbox = vim.env.LVIM_TEST_HOME
+local data = vim.fn.stdpath("data")
+if not sandbox or sandbox == "" or not vim.startswith(vim.fs.normalize(data), vim.fs.normalize(sandbox)) then
+    io.write(
+        "refusing to run: the data directory is not a sandbox\n",
+        "  stdpath('data') = ",
+        data,
+        "\n  LVIM_TEST_HOME  = ",
+        tostring(sandbox),
+        "\nRun the suite through `make test`, which redirects the XDG homes.\n"
+    )
+    os.exit(2)
+end
+
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local function add(dir)
     vim.opt.runtimepath:append(dir)
