@@ -113,6 +113,10 @@ require("lvim-pack").setup({
 
     very_lazy_delay = 50, -- ms after UIEnter before `User VeryLazy` fires
     ensure_builds_delay = 1000, -- ms after startup before pending builds are swept
+    -- Where a shell build's compile cache goes (CARGO_TARGET_DIR): "cache" =
+    -- stdpath("cache")/lvim-pack/build/<plugin>, "tmp" = $TMPDIR or /tmp, "plugin" = the
+    -- build script's own target/, or an absolute path. A CARGO_TARGET_DIR you exported wins.
+    build_cache = "cache",
     build_marker = ".lvim-built", -- stamped in a plugin's dir once its build ran for that commit
 
     -- THE SEAMS. Each defaults to the sibling plugin when it is present and to nothing when it is

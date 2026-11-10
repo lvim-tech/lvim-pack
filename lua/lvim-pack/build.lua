@@ -30,6 +30,67 @@ local function marker_path(name)
     return vim.fn.stdpath("data") .. "/lvim-pack/built/" .. name
 end
 
+--- The CARGO_TARGET_DIR a shell build of `name` gets (`config.build_cache`), or nil when it is left to the
+--- build: `"plugin"`, or a CARGO_TARGET_DIR the user already exported.
+---@param name string
+---@return string|nil
+function M.target_dir(name)
+    if vim.env.CARGO_TARGET_DIR and vim.env.CARGO_TARGET_DIR ~= "" then
+        return nil
+    end
+    local where = config.build_cache or "cache"
+    local base
+    if where == "plugin" then
+        return nil
+    elseif where == "tmp" then
+        base = vim.fs.joinpath(vim.env.TMPDIR or "/tmp", "lvim-pack-build")
+    elseif where == "cache" then
+        base = vim.fs.joinpath(vim.fn.stdpath("cache"), "lvim-pack", "build")
+    elseif type(where) == "string" and where:sub(1, 1) == "/" then
+        base = where
+    else
+        return nil
+    end
+    return vim.fs.joinpath(base, name)
+end
+
+--- Where a build that failed for want of a TOOL is remembered: `<commit>\t<tool>`.
+---@param name string
+---@return string
+local function missing_path(name)
+    return vim.fn.stdpath("data") .. "/lvim-pack/built/" .. name .. ".missing"
+end
+
+--- The tool a shell build could not find, from its exit status 127 and the shell's own message
+--- (`sh: line 17: cargo: command not found`, `cargo: not found`), or nil.
+---@param code integer
+---@param stderr string|nil
+---@return string|nil
+function M.missing_tool(code, stderr)
+    if code ~= 127 then
+        return nil
+    end
+    local text = stderr or ""
+    return text:match("([%w%._%+%-]+): command not found") or text:match("([%w%._%+%-]+): not found")
+end
+
+--- Whether the sweep should leave this build alone: it failed at this very commit because a tool was
+--- missing, and that tool is still missing. Retrying then fails the same way on every start — on a server
+--- with no compiler that was a warning per start, forever. A new commit, or the tool appearing on PATH,
+--- clears it.
+---@param name string
+---@param commit string|nil
+---@return boolean
+function M.blocked(name, commit)
+    local file = missing_path(name)
+    if commit == nil or vim.fn.filereadable(file) == 0 then
+        return false
+    end
+    local line = vim.fn.readfile(file, "", 1)[1] or ""
+    local at, tool = line:match("^(%x+)\t(%S+)$")
+    return at == commit and tool ~= nil and vim.fn.executable(tool) == 0
+end
+
 --- The installed git commit of a plugin (HEAD) — or, for a copy without `.git`, the commit recorded in its
 --- `.lvim-pack-source` stamp — or nil.
 ---
@@ -171,17 +232,29 @@ function M.run(name, build, dir, on_done)
         else
             -- Shell build, DETACHED (async) in the plugin dir so relative hooks like
             -- "./install --bin" resolve — the UI stays live while it runs.
+            -- The compile cache goes where `config.build_cache` says (see `M.target_dir`), not into the
+            -- plugin; a build script reads it as `${CARGO_TARGET_DIR:-target}`.
+            local target = M.target_dir(name)
             vim.system(
                 { "sh", "-c", build },
-                { cwd = dir, text = true },
+                { cwd = dir, text = true, env = target and { CARGO_TARGET_DIR = target } or nil },
                 vim.schedule_wrap(function(res)
                     -- `ok and nil or …` CANNOT express this: `true and nil` is nil, which is falsy,
                     -- so the `or` branch won every time and a SUCCESSFUL build reported its stderr
                     -- as an error (visible in the trace as `ok=true err=Compiling lvim-fuzzy…`).
                     -- cargo writes its progress to stderr, so "stderr is not empty" is not failure.
                     if res.code == 0 then
+                        pcall(vim.fn.delete, missing_path(name))
                         finish(true)
                     else
+                        -- A missing tool is remembered for this commit, so the sweep does not retry a build
+                        -- that cannot succeed (see `M.blocked`). Any other failure is retried as before.
+                        local tool = M.missing_tool(res.code, res.stderr)
+                        local c = tool and dir and M.plugin_commit(dir)
+                        if c then
+                            pcall(vim.fn.mkdir, vim.fn.fnamemodify(missing_path(name), ":h"), "p")
+                            pcall(vim.fn.writefile, { c .. "\t" .. tool }, missing_path(name))
+                        end
                         finish(false, (res.stderr ~= "" and res.stderr) or ("exit " .. tostring(res.code)))
                     end
                 end)
@@ -238,7 +311,7 @@ function M.ensure()
                     local ok, present = pcall(m.spec.built, { dir = dir, commit = cur })
                     missing_artefact = ok and present == false
                 end
-                if stale or missing_artefact then
+                if (stale or missing_artefact) and not M.blocked(name, cur) then
                     M.run(name, m.spec.build, dir)
                 end
             end

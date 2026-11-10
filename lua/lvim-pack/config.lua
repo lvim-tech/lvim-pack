@@ -19,6 +19,7 @@
 ---@field disabled_builtins string[]  load-guard globals set to 1 before anything loads
 ---@field very_lazy_delay integer  ms after UIEnter before the VeryLazy event fires
 ---@field ensure_builds_delay integer  ms after startup before pending builds are swept
+---@field build_cache "cache"|"tmp"|"plugin"|string  where a shell build's CARGO_TARGET_DIR goes: "cache" = stdpath("cache")/lvim-pack/build/<plugin> (default), "tmp" = $TMPDIR or /tmp, "plugin" = left to the build (its own target/), an absolute path = <path>/<plugin>
 ---@field build_marker string  LEGACY name of the in-repo stamp older versions wrote; markers now live under stdpath("data")/lvim-pack/built/ and the sweep migrates+removes the old file
 ---@field on_register (fun(registry: table))|nil  the whole static registry, once, after resolve
 ---@field on_load (fun(name: string, reason: string, ms: number))|nil  one plugin finished loading
@@ -71,6 +72,10 @@ local M = {
 
     very_lazy_delay = 50,
     ensure_builds_delay = 1000,
+    -- Where a shell build's compile cache goes (CARGO_TARGET_DIR). Not in the plugin: a Rust build
+    -- cache is gigabytes, and it is not the plugin's to keep. "cache" survives a reboot; "tmp" keeps the
+    -- disk untouched but starts cold after one; "plugin" leaves it to the build script.
+    build_cache = "cache",
     build_marker = ".lvim-built",
 
     -- The DATA HUB. Defaults report to lvim-pkg when it is there and do nothing when it is not:

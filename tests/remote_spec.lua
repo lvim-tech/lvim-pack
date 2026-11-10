@@ -213,3 +213,100 @@ it("a packed ref, a stamp-only copy, and a directory with neither", function()
     vim.fn.writefile({ "not a sha" }, copy .. "/.lvim-pack-source")
     eq(nil, build.plugin_commit(copy), "a stamp that is not a commit is ignored")
 end)
+
+describe("lvim-pack build: a build that cannot succeed is not retried on every start")
+
+it("reads the missing tool from a shell's exit status 127", function()
+    eq("cargo", build.missing_tool(127, "native/build.sh: line 17: cargo: command not found\n"))
+    eq("cargo", build.missing_tool(127, "native/build.sh: 17: cargo: not found\n"), "dash words it so")
+    eq(nil, build.missing_tool(1, "cargo: command not found"), "only 127 means a missing command")
+    eq(nil, build.missing_tool(101, "error: could not compile"))
+end)
+
+it("a missing tool blocks the sweep at that commit only, and only while the tool is missing", function()
+    local name = "lvim-test-missing-" .. vim.uv.hrtime()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    local commit = ("ab"):rep(20)
+    vim.fn.writefile({ commit }, dir .. "/.lvim-pack-source")
+    local done
+    build.run(name, "exit 127 # sh: lvim-no-such-tool: command not found", dir, function(ok)
+        done = ok
+    end)
+    -- `exit 127` prints nothing; the message is what the shell would say. Use a real missing command.
+    vim.wait(5000, function()
+        return done ~= nil
+    end, 10)
+    eq(false, done)
+    eq(false, build.blocked(name, commit), "no tool named: nothing remembered")
+
+    done = nil
+    build.run(name, "lvim-no-such-tool-xyz --version", dir, function(ok)
+        done = ok
+    end)
+    vim.wait(5000, function()
+        return done ~= nil
+    end, 10)
+    eq(false, done)
+    eq(true, build.blocked(name, commit), "the same commit, the tool still missing: skip")
+    eq(false, build.blocked(name, ("cd"):rep(20)), "another commit: try again")
+    local file = vim.fn.stdpath("data") .. "/lvim-pack/built/" .. name .. ".missing"
+    vim.fn.writefile({ commit .. "\tsh" }, file)
+    eq(false, build.blocked(name, commit), "the tool is on PATH now: try again")
+
+    done = nil
+    build.run(name, "true", dir, function(ok)
+        done = ok
+    end)
+    vim.wait(5000, function()
+        return done ~= nil
+    end, 10)
+    eq(true, done)
+    eq(0, vim.fn.filereadable(file), "a success forgets the missing tool")
+end)
+
+describe("lvim-pack build: where the compile cache goes")
+
+local config = require("lvim-pack.config")
+
+it("cache by default, tmp, a path, or left to the build", function()
+    local saved, env = config.build_cache, vim.env.CARGO_TARGET_DIR
+    vim.env.CARGO_TARGET_DIR = nil
+    local ok, err = pcall(function()
+        config.build_cache = nil
+        eq(vim.fs.joinpath(vim.fn.stdpath("cache"), "lvim-pack", "build", "p"), build.target_dir("p"), "the default")
+        config.build_cache = "cache"
+        eq(vim.fs.joinpath(vim.fn.stdpath("cache"), "lvim-pack", "build", "p"), build.target_dir("p"))
+        config.build_cache = "tmp"
+        eq(vim.fs.joinpath(vim.env.TMPDIR or "/tmp", "lvim-pack-build", "p"), build.target_dir("p"))
+        config.build_cache = "/data/cargo"
+        eq("/data/cargo/p", build.target_dir("p"))
+        config.build_cache = "plugin"
+        eq(nil, build.target_dir("p"))
+        config.build_cache = "cache"
+        vim.env.CARGO_TARGET_DIR = "/mine"
+        eq(nil, build.target_dir("p"), "the user's own CARGO_TARGET_DIR wins")
+    end)
+    config.build_cache, vim.env.CARGO_TARGET_DIR = saved, env
+    if not ok then
+        error(err, 0)
+    end
+end)
+
+it("a shell build sees it as CARGO_TARGET_DIR", function()
+    local saved, env = config.build_cache, vim.env.CARGO_TARGET_DIR
+    vim.env.CARGO_TARGET_DIR = nil
+    config.build_cache = "/data/cargo"
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    local done
+    build.run("lvim-test-target-" .. vim.uv.hrtime(), 'printf %s "$CARGO_TARGET_DIR" > seen', dir, function(ok)
+        done = ok
+    end)
+    vim.wait(5000, function()
+        return done ~= nil
+    end, 10)
+    config.build_cache, vim.env.CARGO_TARGET_DIR = saved, env
+    eq(true, done)
+    truthy(vim.startswith(vim.fn.readfile(dir .. "/seen")[1] or "", "/data/cargo/lvim-test-target-"))
+end)

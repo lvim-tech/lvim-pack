@@ -110,9 +110,17 @@ looking at an empty editor for the seconds the panel needs to load.
 
 `ensure_builds_delay`  (1000) ms after startup before pending builds are swept.
 
+`build_cache`      ("cache") where a shell build's compile cache goes, as
+                   `CARGO_TARGET_DIR`: "cache" = stdpath("cache")/lvim-pack/build/
+                   <plugin>, "tmp" = $TMPDIR or /tmp (gone after a reboot), "plugin"
+                   = the build script's own target/, or an absolute path. A
+                   `CARGO_TARGET_DIR` already exported is left alone. A build that
+                   failed because a tool was missing (exit 127) is not retried by
+                   the sweep at the same commit until the tool is on PATH.
+
 `build_marker`     (".lvim-built") stamped in a plugin's dir once its build ran
                    for that commit. A FAILED build leaves no stamp, so the
-                   sweep retries it.
+                   sweep retries it, unless a tool was missing (`build_cache`).
 
 `on_register`      `fun(registry)` — the whole static registry, once, after
                    resolve. Defaults to lvim-pkg.
