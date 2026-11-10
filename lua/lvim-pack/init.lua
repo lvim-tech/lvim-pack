@@ -553,6 +553,10 @@ function M.setup(opts)
     end
 
     register_commands()
+    -- Before anything yanks: the clipboard provider is picked on first use.
+    pcall(function()
+        require("lvim-pack.remote").setup_clipboard(config.remote_clipboard)
+    end)
     M.load()
 end
 

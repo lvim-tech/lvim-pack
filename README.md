@@ -117,6 +117,9 @@ require("lvim-pack").setup({
     -- stdpath("cache")/lvim-pack/build/<plugin>, "tmp" = $TMPDIR or /tmp, "plugin" = the
     -- build script's own target/, or an absolute path. A CARGO_TARGET_DIR you exported wins.
     build_cache = "cache",
+    -- On the server end of :connect ssh://, yank and put go through OSC 52 to the terminal the
+    -- UI runs in (your clipboard), unless you set g:clipboard yourself. false leaves it alone.
+    remote_clipboard = "osc52",
     build_marker = ".lvim-built", -- stamped in a plugin's dir once its build ran for that commit
 
     -- THE SEAMS. Each defaults to the sibling plugin when it is present and to nothing when it is
@@ -172,6 +175,11 @@ Every ssh call uses the options and `ControlPath` of Neovim's own remote-ssh, so
 open for `:connect` (a password typed once) is reused. The first sync to a host asks; the answer is
 kept in `stdpath("state")/lvim-pack/remote-hosts.json` (`opts.confirm = "always"` skips the
 question). The server needs `rsync`. lvim-space runs this before it connects to a remote project.
+
+Nothing is sent when nothing changed. A fingerprint of what a mirror carries (each plugin's commit, its
+uncommitted and untracked files by size and mtime, the built artefacts) is recorded on the server after a
+mirror; the next sync computes it here (about 0.1 s for 65 plugins) and skips rsync when the server holds
+the same one. A wiped server has no record, so it is mirrored again.
 
 ## A plugin spec
 

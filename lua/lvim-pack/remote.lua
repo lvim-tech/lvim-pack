@@ -294,8 +294,118 @@ echo "os=$(uname -s)"
 echo "arch=$(uname -m)"
 echo "libc=$(ldd --version 2>&1 | head -n 1)"
 command -v rsync >/dev/null 2>&1 && echo "rsync=1"
+f="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pack/synced"
+[ -r "$f" ] && echo "synced=$(head -n 1 "$f")"
 exit 0
 ]]
+
+--- Records what was mirrored, so the next connect can skip rsync when nothing changed. Run as `sh -s` with the
+--- fingerprint AFTER the script on the same stdin (the script ends where `cat` takes the rest).
+---@type string
+M.SYNCED_SCRIPT = [[
+lvim_pack_synced() {
+  d="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pack"
+  mkdir -p "$d" && cat > "$d/synced"
+}
+lvim_pack_synced
+]]
+
+--- Bumped whenever what a mirror contains changes shape, so an older record never matches.
+M.SYNC_FORMAT = 1
+
+--- A fingerprint of everything a mirror sends: each plugin's commit, its uncommitted and untracked files
+--- (path, size, mtime), and the built artefacts. Equal fingerprints here and on the server mean rsync would
+--- move nothing, so it is skipped. A plugin that is not a git checkout counts by every file's size and mtime.
+--- `cb(nil)` when git fails on a checkout: then nothing is skipped.
+---@param plugins LvimPackRemotePlugin[]
+---@param cb fun(fp: string|nil)
+function M.fingerprint(plugins, cb)
+    local build = require("lvim-pack.build")
+    local parts, pending, failed = {}, #plugins, false
+    if pending == 0 then
+        return cb(vim.fn.sha256("lvim-pack-sync-" .. M.SYNC_FORMAT))
+    end
+    local function stat_line(path)
+        local st = vim.uv.fs_stat(path)
+        return st and ("%d:%d.%d"):format(st.size, st.mtime.sec, st.mtime.nsec) or "-"
+    end
+    local function one_done()
+        pending = pending - 1
+        if pending > 0 then
+            return
+        end
+        if failed then
+            return cb(nil)
+        end
+        table.sort(parts)
+        table.insert(parts, 1, "lvim-pack-sync-" .. M.SYNC_FORMAT)
+        cb(vim.fn.sha256(table.concat(parts, "\n")))
+    end
+    for _, p in ipairs(plugins) do
+        local commit = build.plugin_commit(p.dir)
+        if not commit or vim.fn.isdirectory(p.dir .. "/.git") == 0 then
+            -- Not a git checkout: every file (but `.git`), by size and mtime.
+            local lines = { p.rel .. " nogit" }
+            for name, kind in vim.fs.dir(p.dir, { depth = 32 }) do
+                if kind == "file" and not name:find("^%.git/") then
+                    lines[#lines + 1] = name .. " " .. stat_line(p.dir .. "/" .. name)
+                end
+            end
+            table.sort(lines)
+            parts[#parts + 1] = table.concat(lines, "\n")
+            vim.schedule(one_done)
+        else
+            local ok = pcall(
+                vim.system,
+                {
+                    "git",
+                    "-C",
+                    p.dir,
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                },
+                { text = true },
+                vim.schedule_wrap(function(res)
+                    if res.code ~= 0 then
+                        failed = true
+                        return one_done()
+                    end
+                    local lines = { p.rel .. " " .. commit }
+                    for entry in (res.stdout or ""):gmatch("[^%z]+") do
+                        local path = entry:sub(4)
+                        lines[#lines + 1] = entry:sub(1, 2) .. " " .. path .. " " .. stat_line(p.dir .. "/" .. path)
+                    end
+                    if p.build then
+                        for _, sub in ipairs(M.artefact_dirs) do
+                            local dir = vim.fs.joinpath(p.dir, sub)
+                            if vim.fn.isdirectory(dir) == 1 then
+                                for file, kind in vim.fs.dir(dir) do
+                                    if kind == "file" then
+                                        lines[#lines + 1] = "A "
+                                            .. sub
+                                            .. "/"
+                                            .. file
+                                            .. " "
+                                            .. stat_line(dir .. "/" .. file)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    table.sort(lines)
+                    parts[#parts + 1] = table.concat(lines, "\n")
+                    one_done()
+                end)
+            )
+            if not ok then
+                failed = true
+                vim.schedule(one_done)
+            end
+        end
+    end
+end
 
 ---@param stdout string|nil
 ---@return LvimPackRemoteFacts
@@ -307,6 +417,8 @@ function M.parse_facts(stdout)
             f.glibc = M.parse_glibc(v)
         elseif k == "rsync" then
             f.rsync = true
+        elseif k == "synced" then
+            f.synced = v ~= "" and v or nil
         elseif k then
             f[k] = v
         end
@@ -495,6 +607,7 @@ end
 ---@field shipped string[]    artefacts sent along
 ---@field held string[]       artefacts the server could not run (left home)
 ---@field skipped string[]    plugins outside $HOME (not mirrored)
+---@field unchanged boolean|nil  nothing changed since the last mirror to this server: rsync was skipped
 
 ---@class LvimPackRemoteOpts
 ---@field confirm "ask"|"always"|nil  "ask" (default) asks before the FIRST sync to a host
@@ -540,66 +653,124 @@ function M.sync(uri, opts, cb)
         if not there.rsync then
             return cb(false, "rsync is not installed on the server")
         end
-        local groups = M.groups(plugins)
-        local ship, shipped, held = M.artefacts(plugins, M.here(), there)
-        local shipped_files = {}
+        M.fingerprint(plugins, function(fp)
+            local groups = M.groups(plugins)
+            local ship, shipped, held = M.artefacts(plugins, M.here(), there)
+            local shipped_files = {}
 
-        local function stamps()
-            local input = M.stamp_input(plugins, shipped)
-            local report = { plugins = #plugins, shipped = shipped_files, held = held, skipped = skipped }
-            if input == "" then
-                return cb(true, nil, report)
+            -- Nothing changed since the last mirror to THIS server, and the server still has it: skip rsync.
+            if fp and there.synced == fp then
+                return cb(true, nil, {
+                    plugins = #plugins,
+                    shipped = {},
+                    held = held,
+                    skipped = skipped,
+                    unchanged = true,
+                })
             end
-            M.run(
-                M.ssh_argv(t, "sh -s lvim-pack-stamp"),
-                { stdin = M.STAMP_SCRIPT .. input, timeout = opts.timeout },
-                function(res)
-                    if res.code ~= 0 then
-                        return cb(false, "could not write the build stamps: " .. first_line(res))
+
+            --- The last step: record the fingerprint on the server.
+            local function record(report)
+                if not fp then
+                    return cb(true, nil, report)
+                end
+                M.run(
+                    M.ssh_argv(t, "sh -s lvim-pack-synced"),
+                    { stdin = M.SYNCED_SCRIPT .. fp .. "\n", timeout = opts.timeout },
+                    function(res)
+                        if res.code ~= 0 then
+                            return cb(false, "could not record the mirror: " .. first_line(res))
+                        end
+                        cb(true, nil, report)
                     end
-                    cb(true, nil, report)
-                end
-            )
-        end
-
-        local parents = vim.tbl_keys(ship)
-        table.sort(parents)
-
-        local function ship_next(i)
-            if i > #parents then
-                return stamps()
+                )
             end
-            local parent = parents[i]
-            local rel_parent
-            for _, g in ipairs(groups) do
-                if g.parent == parent then
-                    rel_parent = g.rel_parent
-                end
-            end
-            table.sort(ship[parent])
-            M.run(M.artefacts_argv(t, parent, rel_parent, ship[parent]), nil, function(res)
-                if res.code ~= 0 then
-                    return cb(false, "artefact copy failed: " .. first_line(res))
-                end
-                vim.list_extend(shipped_files, ship[parent])
-                ship_next(i + 1)
-            end)
-        end
 
-        local function sync_next(i)
-            if i > #groups then
-                return ship_next(1)
-            end
-            M.run(M.rsync_argv(t, groups[i]), nil, function(res)
-                if res.code ~= 0 then
-                    return cb(false, "rsync failed: " .. first_line(res))
+            local function stamps()
+                local input = M.stamp_input(plugins, shipped)
+                local report = { plugins = #plugins, shipped = shipped_files, held = held, skipped = skipped }
+                if input == "" then
+                    return record(report)
                 end
-                sync_next(i + 1)
-            end)
-        end
+                M.run(
+                    M.ssh_argv(t, "sh -s lvim-pack-stamp"),
+                    { stdin = M.STAMP_SCRIPT .. input, timeout = opts.timeout },
+                    function(res)
+                        if res.code ~= 0 then
+                            return cb(false, "could not write the build stamps: " .. first_line(res))
+                        end
+                        record(report)
+                    end
+                )
+            end
 
-        sync_next(1)
+            local parents = vim.tbl_keys(ship)
+            table.sort(parents)
+
+            local function ship_next(i)
+                if i > #parents then
+                    return stamps()
+                end
+                local parent = parents[i]
+                local rel_parent
+                for _, g in ipairs(groups) do
+                    if g.parent == parent then
+                        rel_parent = g.rel_parent
+                    end
+                end
+                table.sort(ship[parent])
+                M.run(M.artefacts_argv(t, parent, rel_parent, ship[parent]), nil, function(res)
+                    if res.code ~= 0 then
+                        return cb(false, "artefact copy failed: " .. first_line(res))
+                    end
+                    vim.list_extend(shipped_files, ship[parent])
+                    ship_next(i + 1)
+                end)
+            end
+
+            local function sync_next(i)
+                if i > #groups then
+                    return ship_next(1)
+                end
+                M.run(M.rsync_argv(t, groups[i]), nil, function(res)
+                    if res.code ~= 0 then
+                        return cb(false, "rsync failed: " .. first_line(res))
+                    end
+                    sync_next(i + 1)
+                end)
+            end
+
+            sync_next(1)
+        end)
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- The remote side: the clipboard
+-- ---------------------------------------------------------------------------
+
+--- Why this Neovim started (`v:startreason`), or nil on a Neovim that predates it. Tests replace it.
+---@return string|nil
+function M.start_reason()
+    local ok, reason = pcall(function()
+        return vim.v.startreason
+    end)
+    return ok and reason or nil
+end
+
+--- On the server end of `:connect ssh://`, yank and put go through OSC 52: the terminal the UI runs in
+--- holds the user's clipboard, and a clipboard tool on the server (if any) would only reach the SERVER'S.
+--- Neovim turns OSC 52 on by itself only when 'clipboard' is empty and it sees a terminal over ssh; a remote-ssh
+--- server has no terminal, and a config with `clipboard = "unnamedplus"` rules the automatic path out anyway, so
+--- yanking ended in "clipboard: No provider". A `g:clipboard` the user set is left alone.
+---@param mode "osc52"|false|nil  `config.remote_clipboard`
+---@return boolean set  whether it was set here
+function M.setup_clipboard(mode)
+    if mode == false or M.start_reason() ~= "remote-ssh" or vim.g.clipboard ~= nil then
+        return false
+    end
+    vim.g.clipboard = mode or "osc52"
+    return true
 end
 
 return M

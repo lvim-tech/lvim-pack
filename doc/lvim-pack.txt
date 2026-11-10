@@ -261,4 +261,11 @@ connection is reused. The first sync to a host asks (kept in
 `stdpath("state")/lvim-pack/remote-hosts.json`; `opts.confirm = "always"`
 skips it). The server needs `rsync`.
 
+Nothing is sent when nothing changed: a fingerprint of what a mirror carries
+(commits, uncommitted and untracked files by size and mtime, artefacts) is
+recorded on the server, and the next sync skips rsync when it matches.
+
+On the server end, `remote_clipboard` ("osc52") makes yank and put go through
+OSC 52 to the terminal the UI runs in, unless `g:clipboard` is already set.
+
 vim:tw=78:ts=8:noet:ft=help:norl:

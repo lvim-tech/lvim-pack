@@ -173,6 +173,29 @@ it("mirrors source, ships what runs there, stamps the commit", function()
         eq(0, vim.fn.filereadable(fa .. "/lua/new.lua"), "deleted here, deleted there")
         eq(1, vim.fn.filereadable(fa .. "/native/build/libok.so"), "the shipped binary survives")
         eq({ commit }, vim.fn.readfile(fa .. "/.lvim-pack-source"), "and so does the stamp")
+
+        -- Nothing changed: the mirror is skipped. Mark the copy to prove rsync did not run.
+        vim.fn.writefile({ "server-only" }, fa .. "/lua/marker.lua")
+        r = sync()
+        eq(true, r.ok, tostring(r.err))
+        eq(true, r.report.unchanged, "unchanged since the last mirror")
+        eq(1, vim.fn.filereadable(fa .. "/lua/marker.lua"), "rsync --delete did not run")
+
+        -- An already modified file changes again: same git status, new content. It is mirrored.
+        put(a .. "/lua/a.lua", { "return 'edited'" })
+        r = sync()
+        eq(nil, r.report.unchanged)
+        eq({ "return 'edited'" }, vim.fn.readfile(fa .. "/lua/a.lua"))
+        put(a .. "/lua/a.lua", { "return 'edited again'" })
+        r = sync()
+        eq(nil, r.report.unchanged, "a second edit of a dirty file is a change too")
+        eq({ "return 'edited again'" }, vim.fn.readfile(fa .. "/lua/a.lua"))
+
+        -- The server lost its record (wiped, reinstalled): mirrored again.
+        vim.fn.delete(far .. "/.local/share/nvim-remote/lvim-pack/synced")
+        r = sync()
+        eq(nil, r.report.unchanged)
+        eq(1, vim.fn.filereadable(far .. "/.local/share/nvim-remote/lvim-pack/synced"))
     end)
     state.meta, remote.ssh = saved.meta, saved.ssh
     vim.fn.delete(root, "rf")
@@ -309,4 +332,36 @@ it("a shell build sees it as CARGO_TARGET_DIR", function()
     config.build_cache, vim.env.CARGO_TARGET_DIR = saved, env
     eq(true, done)
     truthy(vim.startswith(vim.fn.readfile(dir .. "/seen")[1] or "", "/data/cargo/lvim-test-target-"))
+end)
+
+describe("lvim-pack remote: the clipboard on the server end")
+
+it("OSC 52 on a remote-ssh start, unless the user chose a clipboard or turned it off", function()
+    local saved_reason, saved_clip = remote.start_reason, vim.g.clipboard
+    local ok, err = pcall(function()
+        remote.start_reason = function()
+            return "remote-ssh"
+        end
+        vim.g.clipboard = nil
+        eq(true, remote.setup_clipboard("osc52"))
+        eq("osc52", vim.g.clipboard)
+
+        vim.g.clipboard = { name = "mine" }
+        eq(false, remote.setup_clipboard("osc52"), "the user's own g:clipboard stays")
+        eq("mine", vim.g.clipboard.name)
+
+        vim.g.clipboard = nil
+        eq(false, remote.setup_clipboard(false), "turned off")
+        eq(nil, vim.g.clipboard)
+
+        remote.start_reason = function()
+            return "normal"
+        end
+        eq(false, remote.setup_clipboard("osc52"), "a local start keeps its clipboard tool")
+        eq(nil, vim.g.clipboard)
+    end)
+    remote.start_reason, vim.g.clipboard = saved_reason, saved_clip
+    if not ok then
+        error(err, 0)
+    end
 end)
