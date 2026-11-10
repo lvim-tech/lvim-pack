@@ -518,3 +518,81 @@ it("a package goes only once the server has asked for it; parsers go anyway", fu
     eq({ "ts:html" }, plan.names)
     eq({}, plan.held)
 end)
+
+describe("lvim-pack remote: building for the server while a session runs")
+
+it("fulfil builds here, sends what was asked, and tells the server what failed", function()
+    local saved = { build_here = remote.build_here, run = remote.run, sync_packages = remote.sync_packages }
+    local calls, wanted_seen = {}, nil
+    remote.build_here = function(names, cb)
+        calls[#calls + 1] = "build " .. table.concat(names, ",")
+        cb({ ["ts:bad"] = "no grammar" })
+    end
+    remote.run = function(argv, opts, cb)
+        local cmd = argv[#argv]
+        calls[#calls + 1] = cmd
+        if cmd == "sh -s lvim-pack-failed" then
+            calls[#calls + 1] = opts.stdin:match("(%b{})%s*$")
+        end
+        vim.schedule(function()
+            cb({ code = 0, stdout = cmd == "sh -s lvim-pack-probe" and "os=Linux\npkgroot=/r" or "", stderr = "" })
+        end)
+    end
+    remote.sync_packages = function(_, there, _, cb)
+        wanted_seen = there.wanted
+        cb(true, nil, { "ts:good" }, {})
+    end
+    local done, ok, err
+    remote.fulfil({ host = "h" }, { "ts:good", "ts:bad" }, nil, function(o, e)
+        done, ok, err = true, o, e
+    end)
+    vim.wait(3000, function()
+        return done
+    end, 10)
+    for k, v in pairs(saved) do
+        remote[k] = v
+    end
+    eq(false, ok)
+    truthy(err:find("ts:bad", 1, true), err)
+    eq({ ["ts:good"] = true }, wanted_seen, "only what was built is asked for")
+    eq("build ts:good,ts:bad", calls[1])
+    eq("sh -s lvim-pack-probe", calls[2])
+    eq("sh -s lvim-pack-failed", calls[3])
+    eq({ ["ts:bad"] = "no grammar" }, vim.json.decode(calls[4]))
+end)
+
+it("serve_requests follows the server's requests file and fulfils each batch", function()
+    -- A fake ssh: drops the options, runs the remote command here, in the test's own data home.
+    local fake = vim.fn.tempname()
+    vim.fn.writefile({
+        "#!/bin/sh",
+        'while [ "$1" != "--" ]; do shift; done',
+        "shift 2",
+        'exec sh -c "$1"',
+    }, fake)
+    vim.fn.setfperm(fake, "rwx------")
+    local saved_ssh, saved_fulfil = remote.ssh, remote.fulfil
+    local got = {}
+    remote.ssh = fake
+    remote.fulfil = function(_, names, _, cb)
+        vim.list_extend(got, names)
+        cb(true)
+    end
+    eq(true, remote.serve_requests("ssh://lvim-test-host"))
+    local file = (vim.env.XDG_DATA_HOME or (vim.env.HOME .. "/.local/share")) .. "/nvim-remote/lvim-pkgs/requests"
+    vim.wait(3000, function()
+        return vim.fn.filereadable(file) == 1
+    end, 20)
+    vim.wait(300, function()
+        return false
+    end, 50)
+    local fd = assert(io.open(file, "a"))
+    fd:write("ts:html\nbad name;rm\nsqls\n")
+    fd:close()
+    vim.wait(5000, function()
+        return #got >= 2
+    end, 20)
+    remote.stop_serving()
+    remote.ssh, remote.fulfil = saved_ssh, saved_fulfil
+    eq({ "ts:html", "sqls" }, got, "a line that is not a name is ignored")
+end)

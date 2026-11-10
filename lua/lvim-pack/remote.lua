@@ -652,9 +652,28 @@ end
 M.IMPORT_SCRIPT = [[
 lvim_pack_import() {
   r="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pkgs"
-  mkdir -p "$r" && cat > "$r/import.json"
+  mkdir -p "$r" && cat > "$r/import.json.tmp" && mv -f "$r/import.json.tmp" "$r/import.json"
 }
 lvim_pack_import
+]]
+
+--- Tells the server what could not be built here (name → reason), the same way.
+---@type string
+M.FAILED_SCRIPT = [[
+lvim_pack_failed() {
+  r="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pkgs"
+  mkdir -p "$r" && cat > "$r/failed.json.tmp" && mv -f "$r/failed.json.tmp" "$r/failed.json"
+}
+lvim_pack_failed
+]]
+
+--- Follows the requests the server's lvim-pkg appends while a session runs (one name per line). `tail`
+--- ends with the ssh session it runs in (`--pid` of its parent), so nothing is left on the server.
+---@type string
+M.REQUESTS_SCRIPT = [[
+r="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pkgs"
+mkdir -p "$r" && : > "$r/requests" || exit 1
+exec tail -n 0 -F --pid="$PPID" "$r/requests"
 ]]
 
 --- The stamps, as input for `STAMP_SCRIPT`: one `rel<TAB>commit<TAB>marker` line per build-hook plugin
@@ -826,6 +845,173 @@ function M.sync_packages(t, there, opts, cb)
             end
         )
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Building for the server while a session runs
+-- ---------------------------------------------------------------------------
+
+--- Install `names` here (lvim-pkg names: `ts:<lang>` for a parser, else a package), those not installed yet.
+--- `cb(failed)`: name → reason.
+---@param names string[]
+---@param cb fun(failed: table<string, string>)
+function M.build_here(names, cb)
+    local ok, pkg = pcall(require, "lvim-pkg")
+    if not ok then
+        local failed = {}
+        for _, n in ipairs(names) do
+            failed[n] = "lvim-pkg is not available on the client"
+        end
+        return cb(failed)
+    end
+    local failed, i = {}, 0
+    local function next_one()
+        i = i + 1
+        local name = names[i]
+        if not name then
+            return cb(failed)
+        end
+        local lang = name:match("^ts:(.+)$")
+        local kind, item = lang and "parser" or "mason", lang or name
+        if pkg.is_installed(kind, item) then
+            return next_one()
+        end
+        pkg.install(kind, { item }, function(res)
+            local err = res
+            if type(res) == "table" then
+                err = res[item] ~= true and res[item] or nil
+            end
+            if err then
+                failed[name] = tostring(err)
+            end
+            vim.schedule(next_one)
+        end)
+    end
+    next_one()
+end
+
+--- Build what the server asked for and copy it there: install here when missing, probe the server, and send
+--- the requested names along with whatever else it cannot build. `cb(ok, err)`.
+---@param t LvimPackRemoteTarget
+---@param names string[]
+---@param opts LvimPackRemoteOpts|nil
+---@param cb fun(ok: boolean, err: string|nil)
+function M.fulfil(t, names, opts, cb)
+    opts = opts or {}
+    M.build_here(names, function(failed)
+        M.run(M.ssh_argv(t, "sh -s lvim-pack-probe"), { stdin = M.PROBE_SCRIPT, timeout = opts.timeout }, function(pres)
+            if pres.code ~= 0 then
+                return cb(false, "probe failed: " .. first_line(pres))
+            end
+            local there = M.parse_facts(pres.stdout)
+            for _, n in ipairs(names) do
+                if not failed[n] then
+                    there.wanted[n] = true
+                end
+            end
+            M.sync_packages(t, there, opts, function(sok, serr, imported, held)
+                if not sok then
+                    for _, n in ipairs(names) do
+                        failed[n] = failed[n] or serr
+                    end
+                end
+                for _, n in ipairs(held or {}) do
+                    if vim.tbl_contains(names, n) then
+                        failed[n] = failed[n] or "built here, but the server cannot run it (platform or glibc)"
+                    end
+                end
+                local _ = imported
+                if vim.tbl_isempty(failed) then
+                    return cb(true, nil)
+                end
+                M.run(
+                    M.ssh_argv(t, "sh -s lvim-pack-failed"),
+                    { stdin = M.FAILED_SCRIPT .. vim.json.encode(failed) .. "\n", timeout = opts.timeout },
+                    function()
+                        cb(false, "not sent: " .. table.concat(vim.tbl_keys(failed), ", "))
+                    end
+                )
+            end)
+        end)
+    end)
+end
+
+local serving = {} ---@type table<string, vim.SystemObj>
+
+--- While a session to `uri` runs, follow the server's requests and fulfil them one batch at a time. Stops
+--- with this editor (or `M.stop_serving`). Returns false when it could not start.
+---@param uri string
+---@param opts LvimPackRemoteOpts|nil
+---@return boolean
+function M.serve_requests(uri, opts)
+    local t = M.parse(uri)
+    if not t then
+        return false
+    end
+    local key = login(t) .. ":" .. tostring(t.port or 22)
+    if serving[key] and not serving[key]:is_closing() then
+        return true
+    end
+    local queue, busy, partial = {}, false, ""
+    local function drain()
+        if busy or #queue == 0 then
+            return
+        end
+        busy = true
+        local names = queue
+        queue = {}
+        M.fulfil(t, names, opts, function()
+            busy = false
+            drain()
+        end)
+    end
+    local ok, proc = pcall(vim.system, M.ssh_argv(t, "sh -s lvim-pack-requests"), {
+        text = true,
+        stdin = M.REQUESTS_SCRIPT,
+        stdout = function(_, data)
+            if not data then
+                return
+            end
+            partial = partial .. data
+            local lines = vim.split(partial, "\n", { plain = true })
+            partial = table.remove(lines)
+            vim.schedule(function()
+                for _, line in ipairs(lines) do
+                    local name = vim.trim(line)
+                    if name:match("^[%w][%w%._:@/%-]*$") and not vim.tbl_contains(queue, name) then
+                        queue[#queue + 1] = name
+                    end
+                end
+                drain()
+            end)
+        end,
+    }, function()
+        serving[key] = nil
+    end)
+    if not ok then
+        return false
+    end
+    serving[key] = proc
+    if not M._leave_hooked then
+        M._leave_hooked = true
+        vim.api.nvim_create_autocmd("VimLeavePre", {
+            group = vim.api.nvim_create_augroup("LvimPackRemoteServe", { clear = true }),
+            callback = function()
+                M.stop_serving()
+            end,
+        })
+    end
+    return true
+end
+
+--- Stop following every server's requests.
+function M.stop_serving()
+    for key, proc in pairs(serving) do
+        serving[key] = nil
+        pcall(function()
+            proc:kill("sigterm")
+        end)
+    end
 end
 
 --- Mirror the `dir=` plugins to the server. `cb(ok, err, report)` on the main loop.
