@@ -758,6 +758,34 @@ function M.start_reason()
     return ok and reason or nil
 end
 
+--- On the server end of `:connect ssh://`, spend fewer threads. Shared hosting (CloudLinux LVE) counts every
+--- THREAD of an account against its process limit, and a session with a few Node language servers sits close to
+--- it: each holds 7–11 threads (V8's worker pool and libuv's), most of them idle. Two things follow:
+---
+--- * Commands started from here inherit `UV_THREADPOOL_SIZE` and `NODE_OPTIONS=--v8-pool-size`, both `n`
+---   (a Node server drops from ~11 threads to ~5). Values the environment already holds are left alone.
+--- * Neovim's own libuv pool is started NOW, while there is room. It is otherwise created on the first
+---   asynchronous file operation (a file explorer listing a directory), and libuv aborts the whole process when
+---   it cannot create those threads: the editor died the moment the explorer opened. With the pool in place, a
+---   later shortage makes a language server fail to start instead, which the editor survives.
+---@param n integer|false|nil  `config.remote_threads`; false leaves everything as it is
+---@return boolean set  whether anything was done
+function M.setup_threads(n)
+    if not n or M.start_reason() ~= "remote-ssh" then
+        return false
+    end
+    n = math.max(1, math.floor(n))
+    if (vim.env.UV_THREADPOOL_SIZE or "") == "" then
+        vim.env.UV_THREADPOOL_SIZE = tostring(n)
+    end
+    local node = vim.env.NODE_OPTIONS or ""
+    if not node:find("--v8-pool-size", 1, true) then
+        vim.env.NODE_OPTIONS = vim.trim(node .. " --v8-pool-size=" .. n)
+    end
+    vim.uv.fs_stat(vim.fn.stdpath("data"), function() end)
+    return true
+end
+
 --- On the server end of `:connect ssh://`, yank and put go through OSC 52: the terminal the UI runs in
 --- holds the user's clipboard, and a clipboard tool on the server (if any) would only reach the SERVER'S.
 --- Neovim turns OSC 52 on by itself only when 'clipboard' is empty and it sees a terminal over ssh; a remote-ssh

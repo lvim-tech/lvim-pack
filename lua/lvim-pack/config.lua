@@ -20,6 +20,7 @@
 ---@field very_lazy_delay integer  ms after UIEnter before the VeryLazy event fires
 ---@field ensure_builds_delay integer  ms after startup before pending builds are swept
 ---@field build_cache "cache"|"tmp"|"plugin"|string  where a shell build's CARGO_TARGET_DIR goes: "cache" = stdpath("cache")/lvim-pack/build/<plugin> (default), "tmp" = $TMPDIR or /tmp, "plugin" = left to the build (its own target/), an absolute path = <path>/<plugin>
+---@field remote_threads integer|false  on the server end of `:connect ssh://`: the thread pool size given to commands started from there (libuv and V8) and Neovim's own pool started at once, so a host that counts threads as processes is not exhausted (see remote.setup_threads); false leaves it
 ---@field remote_clipboard "osc52"|false  the clipboard on the server end of `:connect ssh://` (when `g:clipboard` is unset): OSC 52 through the terminal, or false to leave it
 ---@field build_marker string  LEGACY name of the in-repo stamp older versions wrote; markers now live under stdpath("data")/lvim-pack/built/ and the sweep migrates+removes the old file
 ---@field on_register (fun(registry: table))|nil  the whole static registry, once, after resolve
@@ -80,6 +81,9 @@ local M = {
     -- On the server end of `:connect ssh://`, yank and put go through OSC 52, to the terminal the UI runs
     -- in — the user's clipboard. false leaves the clipboard to Neovim.
     remote_clipboard = "osc52",
+    -- On the server end of `:connect ssh://`, the thread pools of Neovim and of the commands it starts (Node
+    -- language servers) are this small, and Neovim's own pool starts at once. false leaves them alone.
+    remote_threads = 2,
     build_marker = ".lvim-built",
 
     -- The DATA HUB. Defaults report to lvim-pkg when it is there and do nothing when it is not:

@@ -557,6 +557,10 @@ function M.setup(opts)
     pcall(function()
         require("lvim-pack.remote").setup_clipboard(config.remote_clipboard)
     end)
+    -- Before any language server or async file operation: both size their thread pools on start.
+    pcall(function()
+        require("lvim-pack.remote").setup_threads(config.remote_threads)
+    end)
     M.load()
 end
 

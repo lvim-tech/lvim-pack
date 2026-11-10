@@ -365,3 +365,42 @@ it("OSC 52 on a remote-ssh start, unless the user chose a clipboard or turned it
         error(err, 0)
     end
 end)
+
+it("a remote-ssh server gives small thread pools to what it starts, and keeps what is set", function()
+    local remote = require("lvim-pack.remote")
+    local saved_reason = remote.start_reason
+    local saved_uv, saved_node = vim.env.UV_THREADPOOL_SIZE, vim.env.NODE_OPTIONS
+    local ok, err = pcall(function()
+        remote.start_reason = function()
+            return "normal"
+        end
+        vim.env.UV_THREADPOOL_SIZE, vim.env.NODE_OPTIONS = nil, nil
+        eq(false, remote.setup_threads(2), "a local start is left alone")
+        eq(nil, vim.env.UV_THREADPOOL_SIZE)
+
+        remote.start_reason = function()
+            return "remote-ssh"
+        end
+        eq(false, remote.setup_threads(false), "turned off")
+        eq(nil, vim.env.NODE_OPTIONS)
+
+        eq(true, remote.setup_threads(2))
+        eq("2", vim.env.UV_THREADPOOL_SIZE)
+        eq("--v8-pool-size=2", vim.env.NODE_OPTIONS)
+
+        -- Again: nothing doubles.
+        remote.setup_threads(2)
+        eq("--v8-pool-size=2", vim.env.NODE_OPTIONS)
+
+        -- Values the environment already holds stay; other Node options are kept.
+        vim.env.UV_THREADPOOL_SIZE, vim.env.NODE_OPTIONS = "8", "--max-old-space-size=512"
+        remote.setup_threads(2)
+        eq("8", vim.env.UV_THREADPOOL_SIZE)
+        eq("--max-old-space-size=512 --v8-pool-size=2", vim.env.NODE_OPTIONS)
+    end)
+    remote.start_reason = saved_reason
+    vim.env.UV_THREADPOOL_SIZE, vim.env.NODE_OPTIONS = saved_uv, saved_node
+    if not ok then
+        error(err, 0)
+    end
+end)
