@@ -404,3 +404,117 @@ it("a remote-ssh server gives small thread pools to what it starts, and keeps wh
         error(err, 0)
     end
 end)
+
+describe("lvim-pack remote: lvim-pkg installs the server cannot build")
+
+--- A fake lvim-pkg root: a parser, a Go package linked into bin/, and an npm package.
+local function fake_pkg_root()
+    local root = vim.fn.tempname()
+    local function write(rel, text)
+        vim.fn.mkdir(vim.fs.dirname(root .. "/" .. rel), "p")
+        local fd = assert(io.open(root .. "/" .. rel, "w"))
+        fd:write(text or "")
+        fd:close()
+    end
+    write("ts/parser/html.so", "elf")
+    write("ts/queries/html/highlights.scm", "(tag)")
+    write("packages/sqls/sqls", "binary GLIBC_2.17")
+    write("packages/newgo/newgo", "binary GLIBC_2.41")
+    vim.fn.mkdir(root .. "/bin", "p")
+    vim.uv.fs_symlink(root .. "/packages/sqls/sqls", root .. "/bin/sqls")
+    vim.uv.fs_symlink(root .. "/packages/newgo/newgo", root .. "/bin/newgo")
+    local receipts = {
+        ["ts:html"] = { type = "parser", version = "p1", bins = {} },
+        sqls = { type = "golang", version = "v1", bins = { "sqls" } },
+        newgo = { type = "golang", version = "v1", bins = { "newgo" } },
+        prettier = { type = "npm", version = "3", bins = { "prettier" } },
+    }
+    return root, receipts
+end
+
+local HERE = { os = "Linux", arch = "x86_64" }
+
+it("the probe reports the build tools and what lvim-pkg has there", function()
+    local f = remote.parse_facts(table.concat({
+        "os=Linux",
+        "tool=go",
+        "pkgroot=/home/u/.local/share/nvim-remote/lvim-pkgs",
+        'pkgstate={"receipts": {"ts:lua": {"version": "x", "type": "parser"}}}',
+        'pkgimport={"sqls": {"type": "golang", "version": "v1"}}',
+    }, "\n"))
+    eq(true, f.tools.go)
+    eq(nil, f.tools.cc)
+    eq("/home/u/.local/share/nvim-remote/lvim-pkgs", f.pkgroot)
+    eq("x", f.receipts["ts:lua"].version)
+    eq("v1", f.pending.sqls.version)
+    local empty = remote.parse_facts("pkgstate={broken")
+    eq({}, empty.receipts)
+end)
+
+it("copies only what the server has no tool to build, cannot already have, and can run", function()
+    local root, receipts = fake_pkg_root()
+    local wanted = { sqls = true, newgo = true, prettier = true }
+    local there =
+        { os = "Linux", arch = "x86_64", glibc = 2040, tools = {}, receipts = {}, pending = {}, wanted = wanted }
+    local plan = remote.pkg_imports(root, receipts, HERE, there)
+    eq({ "sqls", "ts:html" }, plan.names, "npm installs on the server itself")
+    eq({ "newgo" }, plan.held, "needs a newer glibc than the server's")
+    eq({ "packages/sqls", "ts/parser/html.so", "ts/queries/html" }, plan.files)
+    eq({ sqls = "packages/sqls/sqls" }, plan.records.sqls.links)
+    eq("p1", plan.records["ts:html"].version)
+end)
+
+it("compiling on the server comes first: a tool there means nothing is copied", function()
+    local root, receipts = fake_pkg_root()
+    local there =
+        { os = "Linux", arch = "x86_64", glibc = 2041, tools = { gcc = true, go = true }, wanted = { sqls = true } }
+    local plan = remote.pkg_imports(root, receipts, HERE, there)
+    eq({}, plan.names)
+    eq({}, plan.held)
+end)
+
+it("the same version already there, or waiting to be adopted, is not copied again", function()
+    local root, receipts = fake_pkg_root()
+    local there = {
+        os = "Linux",
+        arch = "x86_64",
+        glibc = 2041,
+        tools = {},
+        receipts = { ["ts:html"] = { version = "p1" } },
+        wanted = { sqls = true, newgo = true },
+        pending = { sqls = { type = "golang", version = "v1", links = { sqls = "packages/sqls/sqls" } } },
+    }
+    local plan = remote.pkg_imports(root, receipts, HERE, there)
+    eq({ "newgo" }, plan.names)
+    eq("packages/sqls/sqls", plan.records.sqls.links.sqls, "the pending record is kept in the new import.json")
+
+    there.receipts["ts:html"].version = "p0"
+    eq(true, vim.tbl_contains(remote.pkg_imports(root, receipts, HERE, there).names, "ts:html"), "an older one is")
+end)
+
+it("another platform gets nothing", function()
+    local root, receipts = fake_pkg_root()
+    local plan = remote.pkg_imports(
+        root,
+        receipts,
+        HERE,
+        { os = "Linux", arch = "aarch64", glibc = 2041, tools = {}, wanted = { sqls = true, newgo = true } }
+    )
+    eq({}, plan.names)
+    eq({ "newgo", "sqls", "ts:html" }, plan.held)
+end)
+
+it("the copy keeps paths relative under the server's root", function()
+    local argv = remote.imports_argv({ host = "h" }, "/r", "/srv/pk", { "ts/parser/html.so", "packages/sqls" })
+    eq("-aR", argv[2])
+    eq("/r/./ts/parser/html.so", argv[#argv - 2])
+    eq("/r/./packages/sqls", argv[#argv - 1])
+    eq("h:/srv/pk/", argv[#argv])
+end)
+
+it("a package goes only once the server has asked for it; parsers go anyway", function()
+    local root, receipts = fake_pkg_root()
+    local plan = remote.pkg_imports(root, receipts, HERE, { os = "Linux", arch = "x86_64", glibc = 2041, tools = {} })
+    eq({ "ts:html" }, plan.names)
+    eq({}, plan.held)
+end)

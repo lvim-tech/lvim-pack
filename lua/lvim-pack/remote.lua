@@ -286,6 +286,11 @@ end
 ---@field arch string|nil
 ---@field glibc integer|nil
 ---@field rsync boolean
+---@field tools table<string, boolean>  build tools found on the server (cc, gcc, clang, go, cargo)
+---@field pkgroot string|nil  lvim-pkg's root there
+---@field receipts table<string, table>  what lvim-pkg has installed there
+---@field pending table<string, table>  copied in earlier and not adopted yet (import.json)
+---@field wanted table<string, boolean>  packages the server tried to install and had no toolchain for
 
 --- The server probe: platform, glibc, rsync. Read-only.
 ---@type string
@@ -296,6 +301,12 @@ echo "libc=$(ldd --version 2>&1 | head -n 1)"
 command -v rsync >/dev/null 2>&1 && echo "rsync=1"
 f="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pack/synced"
 [ -r "$f" ] && echo "synced=$(head -n 1 "$f")"
+for t in cc gcc clang go cargo; do command -v "$t" >/dev/null 2>&1 && echo "tool=$t"; done
+r="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pkgs"
+echo "pkgroot=$r"
+[ -r "$r/state.json" ] && echo "pkgstate=$(tr -d '\n' < "$r/state.json")"
+[ -r "$r/import.json" ] && echo "pkgimport=$(tr -d '\n' < "$r/import.json")"
+[ -r "$r/wanted.json" ] && echo "pkgwanted=$(tr -d '\n' < "$r/wanted.json")"
 exit 0
 ]]
 
@@ -410,7 +421,11 @@ end
 ---@param stdout string|nil
 ---@return LvimPackRemoteFacts
 function M.parse_facts(stdout)
-    local f = { rsync = false }
+    local f = { rsync = false, tools = {}, receipts = {}, pending = {}, wanted = {} }
+    local function json(v)
+        local ok, data = pcall(vim.json.decode, v)
+        return (ok and type(data) == "table") and data or {}
+    end
     for line in (stdout or ""):gmatch("[^\r\n]+") do
         local k, v = line:match("^(%w+)=(.*)$")
         if k == "libc" then
@@ -419,6 +434,15 @@ function M.parse_facts(stdout)
             f.rsync = true
         elseif k == "synced" then
             f.synced = v ~= "" and v or nil
+        elseif k == "tool" then
+            f.tools[v] = true
+        elseif k == "pkgstate" then
+            local receipts = json(v).receipts
+            f.receipts = type(receipts) == "table" and receipts or {}
+        elseif k == "pkgimport" then
+            f.pending = json(v)
+        elseif k == "pkgwanted" then
+            f.wanted = json(v)
         elseif k then
             f[k] = v
         end
@@ -477,6 +501,161 @@ function M.artefacts(plugins, here, there)
     table.sort(held)
     return ship, shipped, held
 end
+
+-- ---------------------------------------------------------------------------
+-- Packages the server cannot build (lvim-pkg)
+-- ---------------------------------------------------------------------------
+
+--- The tools that BUILD a package of each kind: a server with none of them cannot install it itself.
+--- Kinds not listed (downloads, npm, pypi) install on the server as usual.
+---@type table<string, string[]>
+M.build_tools = {
+    parser = { "cc", "gcc", "clang" },
+    golang = { "go" },
+    cargo = { "cargo" },
+}
+
+--- Every regular file under `dir` (or `dir` itself when it is a file), absolute.
+---@param path string
+---@return string[]
+local function files_under(path)
+    local st = vim.uv.fs_stat(path)
+    if not st then
+        return {}
+    end
+    if st.type == "file" then
+        return { path }
+    end
+    local out = {}
+    for name, kind in vim.fs.dir(path, { depth = 32 }) do
+        if kind == "file" then
+            out[#out + 1] = path .. "/" .. name
+        end
+    end
+    return out
+end
+
+---@class LvimPackRemoteImport
+---@field files string[]  paths relative to the local root, to copy to the same place under the server's
+---@field records table<string, table>  name → { type, version, bins, links } for the server's import.json
+---@field names string[]  packages copied now
+---@field held string[]  packages the server cannot build and could not run either
+
+--- Which of this machine's lvim-pkg installs to copy: those whose kind the server has no tool to build, it
+--- does not already have at the same version, and it can run (same platform, its glibc is new enough).
+--- Everything else is left to the server's own installer: copying is only the second way. Parsers go all
+--- at once (small, and highlighting wants them for whatever is opened); a package only once the server
+--- has tried to install it and found no toolchain (`wanted`), so a server gets the tools it uses, not
+--- every one installed here.
+---@param root string  this machine's lvim-pkg root
+---@param receipts table<string, table>  this machine's receipts
+---@param here { os: string, arch: string }
+---@param there LvimPackRemoteFacts
+---@return LvimPackRemoteImport
+function M.pkg_imports(root, receipts, here, there)
+    local res = { files = {}, records = {}, names = {}, held = {} }
+    local tools = there.tools or {}
+    -- Copied earlier and not adopted yet: keep them in the record that is written now.
+    for name, r in pairs(there.pending or {}) do
+        res.records[name] = r
+    end
+    local names = vim.tbl_keys(receipts or {})
+    table.sort(names)
+    for _, name in ipairs(names) do
+        local r = receipts[name]
+        local need = type(r) == "table" and M.build_tools[r.type]
+        local can_build = false
+        for _, tool in ipairs(need or {}) do
+            can_build = can_build or tools[tool] == true
+        end
+        local have = (there.receipts or {})[name] or (there.pending or {})[name]
+        local asked = r.type == "parser" or (there.wanted or {})[name] == true
+        if need and asked and not can_build and not (have and have.version == r.version) then
+            local paths, links, ok = {}, {}, true
+            if r.type == "parser" then
+                local lang = name:gsub("^ts:", "")
+                paths = { "ts/parser/" .. lang .. ".so", "ts/queries/" .. lang }
+            else
+                paths = { "packages/" .. name }
+                for _, bin in ipairs(r.bins or {}) do
+                    local target = vim.uv.fs_readlink(root .. "/bin/" .. bin)
+                    if target and vim.startswith(target, root .. "/") then
+                        links[bin] = target:sub(#root + 2)
+                    else
+                        ok = false -- a launcher script, or a link outside the root: not portable
+                    end
+                end
+            end
+            local any = false
+            for _, rel in ipairs(paths) do
+                for _, file in ipairs(files_under(root .. "/" .. rel)) do
+                    any = true
+                    if not M.runs_there(file, here, there) then
+                        ok = false
+                    end
+                end
+            end
+            if ok and vim.uv.fs_stat(root .. "/" .. paths[1]) then
+                for _, rel in ipairs(paths) do
+                    if vim.uv.fs_stat(root .. "/" .. rel) then
+                        res.files[#res.files + 1] = rel
+                    end
+                end
+                res.records[name] = { type = r.type, version = r.version, bins = r.bins or {}, links = links }
+                res.names[#res.names + 1] = name
+            elseif any or not ok then
+                res.held[#res.held + 1] = name
+            end
+        end
+    end
+    return res
+end
+
+--- This machine's lvim-pkg root and receipts, or nil when lvim-pkg is not here.
+---@return string|nil root
+---@return table<string, table> receipts
+function M.local_pkgs()
+    local ok, paths = pcall(require, "lvim-pkg.paths")
+    if not ok then
+        return nil, {}
+    end
+    local root = paths.root()
+    local fd = io.open(root .. "/state.json", "r")
+    if not fd then
+        return root, {}
+    end
+    local raw = fd:read("*a")
+    fd:close()
+    local dok, data = pcall(vim.json.decode, raw or "")
+    local receipts = dok and type(data) == "table" and data.receipts
+    return root, type(receipts) == "table" and receipts or {}
+end
+
+--- The rsync of the copied packages, kept relative (`-R`) under the server's lvim-pkg root.
+---@param t LvimPackRemoteTarget
+---@param root string
+---@param pkgroot string
+---@param files string[]
+---@return string[]
+function M.imports_argv(t, root, pkgroot, files)
+    local argv = { M.rsync, "-aR", "--mkpath", "-e", M.rsync_shell(t) }
+    for _, f in ipairs(files) do
+        argv[#argv + 1] = root .. "/./" .. f
+    end
+    argv[#argv + 1] = ("%s:%s/"):format(login(t), pkgroot)
+    return argv
+end
+
+--- Writes import.json into the server's lvim-pkg root, which lvim-pkg adopts when it starts there. Run as
+--- `sh -s` with the JSON AFTER the script on the same stdin.
+---@type string
+M.IMPORT_SCRIPT = [[
+lvim_pack_import() {
+  r="${XDG_DATA_HOME:-$HOME/.local/share}/nvim-remote/lvim-pkgs"
+  mkdir -p "$r" && cat > "$r/import.json"
+}
+lvim_pack_import
+]]
 
 --- The stamps, as input for `STAMP_SCRIPT`: one `rel<TAB>commit<TAB>marker` line per build-hook plugin
 --- with a known commit (`marker` = 1 when its artefact was shipped).
@@ -608,11 +787,46 @@ end
 ---@field held string[]       artefacts the server could not run (left home)
 ---@field skipped string[]    plugins outside $HOME (not mirrored)
 ---@field unchanged boolean|nil  nothing changed since the last mirror to this server: rsync was skipped
+---@field imported string[]|nil  lvim-pkg installs copied because the server cannot build them
+---@field import_held string[]|nil  lvim-pkg installs the server can neither build nor run
 
 ---@class LvimPackRemoteOpts
 ---@field confirm "ask"|"always"|nil  "ask" (default) asks before the FIRST sync to a host
 ---@field timeout integer|nil         ms for the probe and the stamp step (rsync itself is not limited)
 ---@field home string|nil             local home (tests)
+---@field packages boolean|nil        false: do not copy lvim-pkg installs the server cannot build
+
+--- Copy the lvim-pkg installs the server cannot build (see `pkg_imports`) and record them for adoption.
+--- `cb(ok, err, imported, held)`.
+---@param t LvimPackRemoteTarget
+---@param there LvimPackRemoteFacts
+---@param opts LvimPackRemoteOpts
+---@param cb fun(ok: boolean, err: string|nil, imported: string[], held: string[])
+function M.sync_packages(t, there, opts, cb)
+    local root, receipts = M.local_pkgs()
+    if not root or not there.pkgroot then
+        return cb(true, nil, {}, {})
+    end
+    local plan = M.pkg_imports(root, receipts, M.here(), there)
+    if #plan.names == 0 then
+        return cb(true, nil, {}, plan.held)
+    end
+    M.run(M.imports_argv(t, root, there.pkgroot, plan.files), nil, function(res)
+        if res.code ~= 0 then
+            return cb(false, "package copy failed: " .. first_line(res), {}, plan.held)
+        end
+        M.run(
+            M.ssh_argv(t, "sh -s lvim-pack-import"),
+            { stdin = M.IMPORT_SCRIPT .. vim.json.encode(plan.records) .. "\n", timeout = opts.timeout },
+            function(wres)
+                if wres.code ~= 0 then
+                    return cb(false, "could not record the copied packages: " .. first_line(wres), {}, plan.held)
+                end
+                cb(true, nil, plan.names, plan.held)
+            end
+        )
+    end)
+end
 
 --- Mirror the `dir=` plugins to the server. `cb(ok, err, report)` on the main loop.
 ---@param uri string  ssh://[user@]host[:port][/…]
@@ -652,6 +866,20 @@ function M.sync(uri, opts, cb)
         local there = M.parse_facts(pres.stdout)
         if not there.rsync then
             return cb(false, "rsync is not installed on the server")
+        end
+        -- After the plugins: the lvim-pkg installs the server has no toolchain to build.
+        local done = cb
+        cb = function(ok, err, report)
+            if not ok or opts.packages == false then
+                return done(ok, err, report)
+            end
+            M.sync_packages(t, there, opts, function(pok, perr, imported, held)
+                if not pok then
+                    return done(false, perr, report)
+                end
+                report.imported, report.import_held = imported, held
+                done(true, nil, report)
+            end)
         end
         M.fingerprint(plugins, function(fp)
             local groups = M.groups(plugins)
