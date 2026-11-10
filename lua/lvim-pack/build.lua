@@ -30,7 +30,8 @@ local function marker_path(name)
     return vim.fn.stdpath("data") .. "/lvim-pack/built/" .. name
 end
 
---- The installed git commit of a plugin (HEAD), or nil for a non-git / `dir=` plugin.
+--- The installed git commit of a plugin (HEAD) — or, for a copy without `.git`, the commit recorded in its
+--- `.lvim-pack-source` stamp — or nil.
 ---
 --- READ, NOT SPAWNED. This used to shell out to `git rev-parse HEAD`, which is a process per
 --- plugin on the MAIN LOOP — and the build sweep calls it for every plugin that has a build hook,
@@ -42,6 +43,17 @@ end
 ---@param dir string
 ---@return string|nil
 function M.plugin_commit(dir)
+    -- `readfile` RAISES on a missing file (E484), so each file is checked before it is read.
+    if vim.fn.filereadable(dir .. "/.git/HEAD") == 0 then
+        -- A copy WITHOUT `.git`: a checkout mirrored to a server by `lvim-pack.remote` carries the
+        -- commit it was copied from in this stamp, so the marker check works there as it does here.
+        local stamp_file = dir .. "/.lvim-pack-source"
+        if vim.fn.filereadable(stamp_file) == 0 then
+            return nil
+        end
+        local stamp = vim.trim(vim.fn.readfile(stamp_file, "", 1)[1] or "")
+        return stamp:match("^%x+$") and stamp or nil
+    end
     local head = vim.fn.readfile(dir .. "/.git/HEAD", "", 1)[1]
     if head == nil or head == "" then
         return nil
@@ -51,11 +63,16 @@ function M.plugin_commit(dir)
     if ref == nil then
         return head:match("^%x+$") and head or nil
     end
-    local direct = vim.fn.readfile(dir .. "/.git/" .. ref, "", 1)[1]
-    if direct ~= nil and direct ~= "" then
-        return vim.trim(direct)
+    if vim.fn.filereadable(dir .. "/.git/" .. ref) == 1 then
+        local direct = vim.fn.readfile(dir .. "/.git/" .. ref, "", 1)[1]
+        if direct ~= nil and direct ~= "" then
+            return vim.trim(direct)
+        end
     end
     -- The ref was packed: `packed-refs` holds `<sha> <refname>` lines.
+    if vim.fn.filereadable(dir .. "/.git/packed-refs") == 0 then
+        return nil
+    end
     for _, line in ipairs(vim.fn.readfile(dir .. "/.git/packed-refs")) do
         local sha, name = line:match("^(%x+)%s+(%S+)$")
         if name == ref then

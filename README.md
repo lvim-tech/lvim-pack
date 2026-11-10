@@ -139,11 +139,35 @@ require("lvim-pack").stats() -- { startup_ms = number|nil }
 require("lvim-pack").load_plugin(name) -- load a lazy plugin NOW (deps + config + report)
 require("lvim-pack.deps").resolve(modules) -- expand `dependencies` into the module graph
 require("lvim-pack.deps").bundle(modules) -- expand an umbrella's own `pack.lua`
+require("lvim-pack").remote_sync(uri, opts, cb) -- mirror the dir= plugins to a server (below)
 ```
 
 `stats().startup_ms` is the time from the host's `start_time` to a usable editor, frozen at
 `UIEnter`. Asked before that moment it answers with the live elapsed time, so a dashboard painting
 early still gets an honest number instead of nothing.
+
+## Mirroring the plugins to a server
+
+Neovim's `:connect ssh://` copies the **config** to the server and leaves the plugins to the plugin
+manager there. Third-party plugins come out the same, because the lockfile travels with the config.
+`dir=` checkouts do not: here they are working trees, uncommitted and unpushed work included, and on
+the server they would come from GitHub. `:LvimPackRemoteSync ssh://[user@]host[:port]` (or
+`require("lvim-pack").remote_sync(uri, opts, cb)`) closes that gap:
+
+- every `dir=` plugin is copied with `rsync -a --delete` to the **same path relative to `$HOME`** on
+  the server, which is where the copied config looks for it. Only source goes: `.git` and whatever
+  `.gitignore` names stay here. A checkout outside `$HOME` is named and skipped;
+- for plugins with a `build` hook, the files under `native/build` (`remote.artefact_dirs`) go along
+  when the server can run them: same OS and architecture, and no `GLIBC_x.y` symbol newer than the
+  server's glibc. One it cannot run stays here and is named;
+- each copy with a build hook gets a `.lvim-pack-source` stamp, the commit it came from.
+  `build.plugin_commit` reads it where there is no `.git`. Where the artefact was sent, the build
+  marker is written too, so the server's build sweep does not try to rebuild what already works.
+
+Every ssh call uses the options and `ControlPath` of Neovim's own remote-ssh, so a connection already
+open for `:connect` (a password typed once) is reused. The first sync to a host asks; the answer is
+kept in `stdpath("state")/lvim-pack/remote-hosts.json` (`opts.confirm = "always"` skips the
+question). The server needs `rsync`. lvim-space runs this before it connects to a remote project.
 
 ## A plugin spec
 

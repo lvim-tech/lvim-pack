@@ -13,6 +13,7 @@ CONTENTS                                                   *lvim-pack-contents*
     6. API ................................... |lvim-pack-api|
     7. Plugin specs .......................... |lvim-pack-spec|
     8. Health ................................ |lvim-pack-health|
+    9. Mirroring to a server ................. |lvim-pack-remote|
 
 ==============================================================================
 1. INTRODUCTION                                        *lvim-pack-introduction*
@@ -225,5 +226,31 @@ a dashboard painting early gets an honest number instead of nothing.
   that ran with an empty spec looks healthy until a plugin is missing
 - whether TWO copies of lvim-pack are on the runtimepath: a dev checkout and an
   installed clone both being live is the one failure that looks like nothing
+
+==============================================================================
+9. MIRRORING TO A SERVER                                     *lvim-pack-remote*
+                                                       *:LvimPackRemoteSync*
+:LvimPackRemoteSync ssh://[{user}@]{host}[:{port}]
+    Copy every `dir=` plugin to the server, for |remote-ssh|. Lua:
+    `require("lvim-pack").remote_sync(uri, opts, cb)`.
+
+|remote-ssh| copies the config, not the plugins. Third-party plugins match
+anyway (the lockfile travels with the config); `dir=` checkouts would come
+from GitHub on the server and differ from the working trees here.
+
+  - Each `dir=` plugin goes with `rsync -a --delete` to the same path
+    relative to `$HOME` on the server. Source only: `.git` and what
+    `.gitignore` names stay here. A checkout outside `$HOME` is skipped.
+  - For plugins with a `build` hook, files under `native/build`
+    (`remote.artefact_dirs`) go along when the server can run them: same OS
+    and architecture, no `GLIBC_x.y` symbol newer than its glibc.
+  - Each copy with a build hook gets `.lvim-pack-source`, the commit it came
+    from, which `build.plugin_commit` reads where there is no `.git`. Where
+    the artefact was sent, the build marker is written too.
+
+ssh runs with the options and ControlPath of remote-ssh, so an open
+connection is reused. The first sync to a host asks (kept in
+`stdpath("state")/lvim-pack/remote-hosts.json`; `opts.confirm = "always"`
+skips it). The server needs `rsync`.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

@@ -491,6 +491,40 @@ function M.load()
     end, config.ensure_builds_delay)
 end
 
+--- Mirror the `dir=` plugins this editor runs to a server, for `:connect ssh://` (see `lvim-pack.remote`).
+---@param uri string  ssh://[user@]host[:port][/…]
+---@param opts LvimPackRemoteOpts|nil
+---@param cb fun(ok: boolean, err: string|nil, report: LvimPackRemoteReport|nil)|nil
+---@return nil
+function M.remote_sync(uri, opts, cb)
+    require("lvim-pack.remote").sync(uri, opts, cb)
+end
+
+--- `:LvimPackRemoteSync ssh://[user@]host[:port]`: the same, reported with vim.notify.
+---@return nil
+local function register_commands()
+    vim.api.nvim_create_user_command("LvimPackRemoteSync", function(cmd)
+        vim.notify("lvim-pack: mirroring plugins to " .. cmd.args .. " ...")
+        M.remote_sync(cmd.args, nil, function(ok, err, report)
+            if not ok then
+                vim.notify("lvim-pack: remote sync failed: " .. tostring(err), vim.log.levels.ERROR)
+                return
+            end
+            local msg = ("lvim-pack: %d plugins mirrored"):format(report.plugins)
+            if #report.shipped > 0 then
+                msg = msg .. ("; built files sent: %s"):format(table.concat(report.shipped, ", "))
+            end
+            if #report.held > 0 then
+                msg = msg .. ("; NOT sent (the server cannot run them): %s"):format(table.concat(report.held, ", "))
+            end
+            if #report.skipped > 0 then
+                msg = msg .. ("; outside $HOME, not mirrored: %s"):format(table.concat(report.skipped, ", "))
+            end
+            vim.notify(msg, #report.held > 0 and vim.log.levels.WARN or vim.log.levels.INFO)
+        end)
+    end, { nargs = 1, desc = "Mirror the dir= plugins to a server for :connect ssh://" })
+end
+
 --- Merge the host's options into the live config, install the defaults that reach for the sibling
 --- plugins, and load.
 ---@param opts LvimPackConfig
@@ -518,6 +552,7 @@ function M.setup(opts)
         end
     end
 
+    register_commands()
     M.load()
 end
 
