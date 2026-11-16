@@ -396,7 +396,7 @@ function M.load()
                         done(true)
                         return
                     end
-                    build.run(name, m.spec.build, opt_dir .. name, done)
+                    build.run(name, m.spec.build, opt_dir .. name, done, { quiet = true }) -- the panel shows it
                 end,
             })
         end

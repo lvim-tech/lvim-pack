@@ -117,6 +117,9 @@ require("lvim-pack").setup({
     -- stdpath("cache")/lvim-pack/build/<plugin>, "tmp" = $TMPDIR or /tmp, "plugin" = the
     -- build script's own target/, or an absolute path. A CARGO_TARGET_DIR you exported wins.
     build_cache = "cache",
+    -- Say "building <plugin>…" / "built <plugin>" around a slow build (a shell command, an
+    -- async hook). A failure is reported either way; the installer panel shows its own progress.
+    build_notify = true,
     -- On the server end of :connect ssh://, yank and put go through OSC 52 to the terminal the
     -- UI runs in (your clipboard), unless you set g:clipboard yourself. false leaves it alone.
     remote_clipboard = "osc52",

@@ -19,6 +19,7 @@
 ---@field disabled_builtins string[]  load-guard globals set to 1 before anything loads
 ---@field very_lazy_delay integer  ms after UIEnter before the VeryLazy event fires
 ---@field ensure_builds_delay integer  ms after startup before pending builds are swept
+---@field build_notify boolean  say when a slow build (shell / async hook) starts and is done; a failure is always reported
 ---@field build_cache "cache"|"tmp"|"plugin"|string  where a shell build's CARGO_TARGET_DIR goes: "cache" = stdpath("cache")/lvim-pack/build/<plugin> (default), "tmp" = $TMPDIR or /tmp, "plugin" = left to the build (its own target/), an absolute path = <path>/<plugin>
 ---@field remote_threads integer|false  on the server end of `:connect ssh://`: the thread pool size given to commands started from there (libuv and V8) and Neovim's own pool started at once, so a host that counts threads as processes is not exhausted (see remote.setup_threads); false leaves it
 ---@field remote_clipboard "osc52"|false  the clipboard on the server end of `:connect ssh://` (when `g:clipboard` is unset): OSC 52 through the terminal, or false to leave it
@@ -78,6 +79,10 @@ local M = {
     -- cache is gigabytes, and it is not the plugin's to keep. "cache" survives a reboot; "tmp" keeps the
     -- disk untouched but starts cold after one; "plugin" leaves it to the build script.
     build_cache = "cache",
+    -- Say "building <plugin>…" / "built <plugin>" around a slow build (a shell command, an async
+    -- hook — a native library compiles for a minute), so a background compile is not invisible.
+    -- A failure is reported either way. The installer panel shows its own progress, so it is quiet there.
+    build_notify = true,
     -- On the server end of `:connect ssh://`, yank and put go through OSC 52, to the terminal the UI runs
     -- in — the user's clipboard. false leaves the clipboard to Neovim.
     remote_clipboard = "osc52",

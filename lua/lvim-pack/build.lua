@@ -160,8 +160,9 @@ end
 ---@param build function|string
 ---@param dir? string
 ---@param on_done? fun(ok: boolean, err: string|nil)
+---@param opts? { quiet?: boolean }  quiet = no start / done messages (a caller that shows its own progress)
 ---@return nil
-function M.run(name, build, dir, on_done)
+function M.run(name, build, dir, on_done, opts)
     -- ONE BUILD PER PLUGIN AT A TIME. The same plugin is asked to build from three independent
     -- places — the installer's build phase, the `PackChanged` hook, and the self-healing sweep —
     -- and the marker that would tell a later caller it is already done is written only when the
@@ -181,6 +182,16 @@ function M.run(name, build, dir, on_done)
     -- is idempotent, so this is safe on the sweep path too.
     pcall(vim.cmd.packadd, name)
 
+    -- A SLOW build (a shell command, an async hook: a native library compiles for a minute) says
+    -- when it starts and when it is done, unless `config.build_notify` is off or the caller shows
+    -- its own progress. A failure is always reported (below).
+    local slow = (type(build) == "string" and build:sub(1, 1) ~= ":")
+        or (type(build) == "function" and debug.getinfo(build, "u").nparams >= 1)
+    local say = slow and config.build_notify ~= false and not (opts and opts.quiet)
+    if say then
+        vim.notify("lvim-pack: building " .. name .. "…", vim.log.levels.INFO)
+    end
+
     -- Completion (always on the main loop, so it is safe from a `vim.system` / task callback):
     -- stamp the marker ONLY on success (a failed/partial build stays un-marked so the sweep
     -- retries), warn on failure, then answer the caller and everyone who attached meanwhile.
@@ -197,8 +208,11 @@ function M.run(name, build, dir, on_done)
                     -- The retired in-repo stamp, if a previous version left one.
                     pcall(vim.fn.delete, dir .. "/" .. config.build_marker)
                 end
-            elseif not ok then
+            end
+            if not ok then
                 vim.notify("lvim-pack: build failed for " .. name .. ": " .. tostring(err), vim.log.levels.WARN)
+            elseif say then
+                vim.notify("lvim-pack: built " .. name, vim.log.levels.INFO)
             end
             if on_done then
                 on_done(ok, err)
